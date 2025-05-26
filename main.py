@@ -9,7 +9,7 @@ load_dotenv()
 
 app = FastAPI()
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+API_KEY = os.getenv("OPENROUTER_API_KEY")
 ASSISTANT_ID = os.getenv("ASSISTANT_API_KEY")
 
 # 🧠 Хэрэглэгч бүрийн thread ID-г хадгалах dict
