@@ -22,9 +22,9 @@ async def chatwoot_webhook(request: Request, body: dict = Body(...)):
         sender = body.get("sender") or body.get("meta", {}).get("sender")
         user_id = str(sender.get("id") if sender else "anonymous")
         content = body.get("content", "")
-        if body.get("content_type") != "text":
-            print("⚠️ Non-text message ignored.")
-            return {"content": "Текст мессеж илгээнэ үү."}
+        # if body.get("content_type") != "text":
+        #     print("⚠️ Non-text message ignored.")
+        #     return {"content": "Текст мессеж илгээнэ үү."}
 
         # thread_id-г шалгах
         if user_id not in user_threads:
