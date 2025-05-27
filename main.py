@@ -22,8 +22,12 @@ async def chatwoot_webhook(request: Request):
         print("📥 Body from Chatwoot:", body)
 
         # ✅ sender.id болон content задлах
-        user_id = str(body.get("sender", {}).get("id", "anonymous"))
-        content = body.get("content", "")
+        user_id = str(body.get("meta", {}).get("sender", {}).get("id", "anonymous"))
+
+        content = (
+            body.get("messages", [{}])[0].get("content")
+            or body.get("content", "")
+        )
 
         if not content:
             return {"content": "⚠️ Message хоосон байна."}
