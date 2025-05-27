@@ -61,7 +61,7 @@ async def create_thread() -> str:
 
 async def get_assistant_response(message: str, thread_id: str) -> str:
     async with httpx.AsyncClient() as client:
-        # 1. Message нэмэх
+        # 1. Add user message
         await client.post(
             f"https://api.openai.com/v1/threads/{thread_id}/messages",
             headers={
@@ -72,7 +72,7 @@ async def get_assistant_response(message: str, thread_id: str) -> str:
             json={"role": "user", "content": message}
         )
 
-        # 2. Run эхлүүлэх
+        # 2. Start run
         run_res = await client.post(
             f"https://api.openai.com/v1/threads/{thread_id}/runs",
             headers={
@@ -82,9 +82,13 @@ async def get_assistant_response(message: str, thread_id: str) -> str:
             },
             json={"assistant_id": ASSISTANT_ID}
         )
-        run_id = run_res.json().get("id")
+        run_data = run_res.json()
+        run_id = run_data.get("id")
+        if not run_id:
+            print("❌ Run creation failed:", run_data)
+            return "Ассистант ажиллаж чадсангүй."
 
-        # 3. Run дуусахыг хүлээх
+        # 3. Poll status
         while True:
             status_res = await client.get(
                 f"https://api.openai.com/v1/threads/{thread_id}/runs/{run_id}",
@@ -93,12 +97,14 @@ async def get_assistant_response(message: str, thread_id: str) -> str:
                     "OpenAI-Beta": "assistants=v2"
                 }
             )
-            status = status_res.json()["status"]
+            status = status_res.json().get("status", "")
             if status == "completed":
                 break
+            elif status == "failed":
+                return "Хариу боловсруулах явцад алдаа гарлаа."
             await asyncio.sleep(1)
 
-        # 4. Хариу авах
+        # 4. Get assistant reply
         messages_res = await client.get(
             f"https://api.openai.com/v1/threads/{thread_id}/messages",
             headers={
@@ -106,5 +112,9 @@ async def get_assistant_response(message: str, thread_id: str) -> str:
                 "OpenAI-Beta": "assistants=v2"
             }
         )
-        messages = messages_res.json()["data"]
+        messages = messages_res.json().get("data", [])
+        if not messages:
+            print("❌ No messages returned:", messages_res.json())
+            return "Хариу ирсэнгүй."
+
         return messages[0]["content"][0]["text"]["value"]
