@@ -272,10 +272,16 @@ def webhook():
             
             email_verified_value = contact_attrs.get("email_verified", False)
             is_verified = str(email_verified_value).strip().lower() in ["true", "1", "yes"]
-
             verified_email = contact_attrs.get("verified_email", "")
-
-            print(f"Contact {contact_id} verified: {is_verified}, email: {verified_email}")
+            
+            print(f"=== Debug Info ===")
+            print(f"Contact ID: {contact_id}")
+            print(f"Raw email_verified value: {email_verified_value} (type: {type(email_verified_value)})")
+            print(f"Is verified: {is_verified}")
+            print(f"Verified email: {verified_email}")
+            print(f"Contact custom attributes: {contact_attrs}")
+            print(f"==================")
+            
         except Exception as e:
             print(f"Contact мэдээлэл авахад алдаа: {e}")
             is_verified = False
