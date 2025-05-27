@@ -9,7 +9,7 @@ load_dotenv()
 
 app = FastAPI()
 
-API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENROUTER_API_KEY")
 ASSISTANT_ID = os.getenv("ASSISTANT_API_KEY")
 
 user_threads = {}
