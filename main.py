@@ -4,7 +4,7 @@ from openai import OpenAI
 import requests
 
 app = Flask(__name__)
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+client = os.environ["OPENAI_API_KEY"]
 ASSISTANT_ID = os.environ["ASSISTANT_ID"]
 CHATWOOT_KEY = os.environ["CHATWOOT_API_KEY"]
 ACCOUNT_ID   = os.environ["ACCOUNT_ID"]
