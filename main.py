@@ -94,6 +94,21 @@ def send_verification_email(email, token):
         print(f"Имэйл илгээхэд алдаа: {e}")
         return False
 
+def get_contact(contact_id):
+    """Contact мэдээлэл авах"""
+    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/{contact_id}"
+    resp = requests.get(url, headers={"api_access_token": CHATWOOT_API_KEY})
+    resp.raise_for_status()
+    return resp.json()
+
+def update_contact(contact_id, attrs):
+    """Contact-ийн custom attributes шинэчлэх"""
+    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/{contact_id}"
+    payload = {"custom_attributes": attrs}
+    resp = requests.put(url, json=payload, headers={"api_access_token": CHATWOOT_API_KEY})
+    resp.raise_for_status()
+    return resp.json()
+
 def get_conversation(conv_id):
     """Conversation мэдээлэл авах"""
     url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}"
@@ -182,15 +197,22 @@ def verify_email():
         return "Токен хүчингүй эсвэл хугацаа дууссан!", 400
     
     try:
-        # Conversation-д email_verified = true гэж тэмдэглэх
+        # Contact level дээр email_verified = true гэж тэмдэглэх
         conv_id = payload['conv_id']
         contact_id = payload['contact_id']
         email = payload['email']
         
-        update_conversation(conv_id, {
+        # Contact дээр баталгаажуулалтын мэдээлэл хадгалах
+        update_contact(contact_id, {
             "email_verified": True,
             "verified_email": email,
-            f"verified_contact_{contact_id}": True
+            "verification_date": datetime.utcnow().isoformat()
+        })
+        
+        # Conversation дээр thread мэдээлэл хадгалах (thread нь conversation specific)
+        thread_key = f"openai_thread_{contact_id}"
+        update_conversation(conv_id, {
+            thread_key: None  # Шинэ thread эхлүүлэх
         })
         
         # Баталгаажуулах мессеж илгээх
@@ -243,12 +265,17 @@ def webhook():
             send_to_chatwoot(conv_id, "Алдаа: Хэрэглэгчийн мэдээлэл олдсонгүй.")
             return jsonify({"status": "error"}), 400
 
-        # Conversation мэдээлэл авах
-        conv = get_conversation(conv_id)
-        attrs = conv.get("custom_attributes", {})
-        
-        # Хэрэглэгч баталгаажсан эсэхийг шалгах
-        is_verified = attrs.get("email_verified", False) and attrs.get(f"verified_contact_{contact_id}", False)
+        # Contact-аас баталгаажуулалтын статус шалгах
+        try:
+            contact = get_contact(contact_id)
+            contact_attrs = contact.get("custom_attributes", {})
+            is_verified = contact_attrs.get("email_verified", False)
+            verified_email = contact_attrs.get("verified_email", "")
+            
+            print(f"Contact {contact_id} verified: {is_verified}, email: {verified_email}")
+        except Exception as e:
+            print(f"Contact мэдээлэл авахад алдаа: {e}")
+            is_verified = False
         
         if not is_verified:
             # Имэйл хаяг шаардах
@@ -273,14 +300,19 @@ def webhook():
             return jsonify({"status": "waiting_verification"}), 200
 
         # Хэрэглэгч баталгаажсан бол AI chatbot ажиллуулах
+        # Conversation level дээрх thread мэдээлэл авах
+        conv = get_conversation(conv_id)
+        conv_attrs = conv.get("custom_attributes", {})
+        
         thread_key = f"openai_thread_{contact_id}"
-        thread_id = attrs.get(thread_key)
+        thread_id = conv_attrs.get(thread_key)
         
         # Thread байхгүй бол шинээр үүсгэх
         if not thread_id:
             thread = client.beta.threads.create()
             thread_id = thread.id
             update_conversation(conv_id, {thread_key: thread_id})
+            print(f"Шинэ thread үүсгэлээ: {thread_id}")
 
         # AI-аас хариулт авч Chatwoot руу илгээх
         ai_response = get_ai_response(thread_id, message_content)
