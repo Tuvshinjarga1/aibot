@@ -204,7 +204,7 @@ def verify_email():
         
         # Contact дээр баталгаажуулалтын мэдээлэл хадгалах
         update_contact(contact_id, {
-            "email_verified": True,
+            "email_verified": "true",  # Checkbox type-д string "true" ашиглах
             "verified_email": email,
             "verification_date": datetime.utcnow().isoformat()
         })
@@ -269,9 +269,12 @@ def webhook():
         try:
             contact = get_contact(contact_id)
             contact_attrs = contact.get("custom_attributes", {})
-            is_verified = contact_attrs.get("email_verified", False)
-            verified_email = contact_attrs.get("verified_email", "")
             
+            email_verified_value = contact_attrs.get("email_verified", False)
+            is_verified = bool(email_verified_value)  # ✅ зөв
+
+            verified_email = contact_attrs.get("verified_email", "")
+
             print(f"Contact {contact_id} verified: {is_verified}, email: {verified_email}")
         except Exception as e:
             print(f"Contact мэдээлэл авахад алдаа: {e}")
