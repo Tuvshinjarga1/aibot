@@ -53,10 +53,11 @@ def webhook():
     if not thread_id:
         thread = client.beta.threads.create()
         thread_id = thread.id
-        # Хадгалах
+
+        # ЗӨВ PUT payload!
         requests.put(
             f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}",
-            json={"custom_attributes": {"thread_id": thread_id}},
+            json={"conversation": {"custom_attributes": {"thread_id": thread_id}}},
             headers={"api_access_token": CHATWOOT_API_KEY}
         )
 
