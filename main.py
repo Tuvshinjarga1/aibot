@@ -12,38 +12,36 @@ app = FastAPI()
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 ASSISTANT_ID = os.getenv("ASSISTANT_API_KEY")
 
-# 🧠 Хэрэглэгч бүрийн thread ID-г хадгалах dict
+# Түр хадгалах dict
 user_threads = {}
 
-class ChatwootRequest(BaseModel):
-    content: str
-
 @app.post("/api/chatwoot")
-async def chatwoot_webhook(data: ChatwootRequest, request: Request):
-    body = await request.json()
-    user_id = str(body.get("sender", {}).get("id", "anonymous"))
-
+async def chatwoot_webhook(request: Request):
     try:
         body = await request.json()
-        print("📥 Body:", body)
+        print("📥 Body from Chatwoot:", body)
 
-        # ✅ Хэрэглэгч ID авах (Chatwoot sender ID)
+        # ✅ sender.id болон content задлах
         user_id = str(body.get("sender", {}).get("id", "anonymous"))
         content = body.get("content", "")
 
-        # 🧠 Thread ID олгох
+        if not content:
+            return {"content": "⚠️ Message хоосон байна."}
+
+        # 🧠 thread_id олгох
         if user_id not in user_threads:
             thread_id = await create_new_thread()
             user_threads[user_id] = thread_id
         else:
             thread_id = user_threads[user_id]
 
-        # 🤖 Assistant-аас хариу авах
-        reply = await get_assistant_response(data.content, thread_id)
+        reply = await get_assistant_response(content, thread_id)
         return {"content": reply}
+
     except Exception as e:
-        print("⚠️ Алдаа:", e)
-        return {"content": "Алдаа гарлаа."}
+        import traceback
+        traceback.print_exc()
+        return {"content": "💥 Алдаа гарлаа."}
 
 
 async def create_new_thread() -> str:
@@ -70,7 +68,7 @@ async def get_assistant_response(message: str, thread_id: str) -> str:
                 "OpenAI-Beta": "assistants=v2",
                 "Content-Type": "application/json"
             },
-            json={ "role": "user", "content": message }
+            json={"role": "user", "content": message}
         )
 
         # 2. Run эхлүүлэх
@@ -81,12 +79,11 @@ async def get_assistant_response(message: str, thread_id: str) -> str:
                 "OpenAI-Beta": "assistants=v2",
                 "Content-Type": "application/json"
             },
-            json={ "assistant_id": ASSISTANT_ID }
+            json={"assistant_id": ASSISTANT_ID}
         )
-        run_res.raise_for_status()
         run_id = run_res.json()["id"]
 
-        # 3. Run гүйцэтгэл хүлээх (polling)
+        # 3. Polling — run дуусахыг хүлээх
         while True:
             status_res = await client.get(
                 f"https://api.openai.com/v1/threads/{thread_id}/runs/{run_id}",
@@ -96,13 +93,12 @@ async def get_assistant_response(message: str, thread_id: str) -> str:
                     "Content-Type": "application/json"
                 }
             )
-            status_res.raise_for_status()
             status = status_res.json()["status"]
             if status == "completed":
                 break
-            await asyncio.sleep(1)  # бага зэрэг хүлээнэ
+            await asyncio.sleep(1)
 
-        # 4. Messages-г авах
+        # 4. Хариу авах
         messages_res = await client.get(
             f"https://api.openai.com/v1/threads/{thread_id}/messages",
             headers={
@@ -111,12 +107,5 @@ async def get_assistant_response(message: str, thread_id: str) -> str:
                 "Content-Type": "application/json"
             }
         )
-        messages_res.raise_for_status()
-        messages = messages_res.json()["data"]
-        reply = messages[0]["content"][0]["text"]["value"]
+        reply = messages_res.json()["data"][0]["content"][0]["text"]["value"]
         return reply
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8080))  # Railway PORT heregtei
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
