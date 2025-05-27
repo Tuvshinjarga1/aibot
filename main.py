@@ -45,7 +45,9 @@ def webhook():
         f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}",
         headers={"api_access_token": CHATWOOT_API_KEY}
     ).json()
-    thread_id = conv["conversation"]["custom_attributes"].get("thread_id")
+    # direct custom_attributes-ийг аваад
+    attrs = conv.get("custom_attributes", {})
+    thread_id = attrs.get("thread_id")
 
     # Хэрвээ thread_id байхгүй бол шинээр үүсгээд хадгална
     if not thread_id:
@@ -54,7 +56,7 @@ def webhook():
         # Хадгалах
         requests.put(
             f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}",
-            json={"conversation": {"custom_attributes": {"thread_id": thread_id}}},
+            json={"custom_attributes": {"thread_id": thread_id}},
             headers={"api_access_token": CHATWOOT_API_KEY}
         )
 
@@ -80,6 +82,6 @@ def webhook():
     send_to_chatwoot(conv_id, reply)
 
     return jsonify({"status":"ok"})
-    
+
 if __name__ == "__main__":
     app.run(port=5000)
