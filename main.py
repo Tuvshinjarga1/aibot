@@ -61,29 +61,33 @@ def send_to_chatwoot(conversation_id, reply):
     print(f"Chatwoot API status: {response.status_code}")
     print(f"Chatwoot response: {response.text}")
 
-
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.json
     print("Webhook received:", data)
 
     try:
-        # 🛑 Зөвхөн хэрэглэгчийн ирсэн мессеж (message_type: 0) дээр ажиллана
-        if data.get('message_type') != 0:
+        # 🛑 Зөвхөн хэрэглэгчийн ирсэн мессеж (message_type: "incoming") дээр ажиллана
+        if data.get('message_type') != "incoming":
             print("⛔ Skip non-incoming message (e.g. outgoing bot reply)")
             return jsonify({"status": "skipped"})
 
-        # 🟢 Эндээс эхлээд AI-д дамжуулах
+        # 🟢 Хэрэглэгчийн мессежийг AI-д дамжуулна
         message = data['content']
         conversation_id = data['conversation']['id']
 
+        # 🧠 AI хариултыг авах
         ai_reply = ask_ai(message)
+        print("🧠 AI reply:", ai_reply)  # Логлох
+
+        # 💬 Chatwoot руу илгээх
         send_to_chatwoot(conversation_id, ai_reply)
         return jsonify({"status": "ok"})
 
     except Exception as e:
         print("Error:", e)
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 if __name__ == '__main__':
     app.run(port=5000)
