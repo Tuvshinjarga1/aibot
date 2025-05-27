@@ -24,6 +24,13 @@ async def chatwoot_webhook(data: ChatwootRequest, request: Request):
     user_id = str(body.get("sender", {}).get("id", "anonymous"))
 
     try:
+        body = await request.json()
+        print("📥 Body:", body)
+
+        # ✅ Хэрэглэгч ID авах (Chatwoot sender ID)
+        user_id = str(body.get("sender", {}).get("id", "anonymous"))
+        content = body.get("content", "")
+
         # 🧠 Thread ID олгох
         if user_id not in user_threads:
             thread_id = await create_new_thread()
