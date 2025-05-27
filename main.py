@@ -19,7 +19,7 @@ def ask_ai(message):
         "messages": [
             {
                 "role": "system",
-                "content": "Та бол Монгол хэл дээр хариулдаг тусгай туслагч бөгөөд зөвхөн Cloud.mn вэбсайттай холбоотой асуултад ойлгомжтой, товч, хэрэгтэй мэдээлэл өгдөг."
+                "content": "Та зөвхөн https://cloud.mn сайттай холбоотой асуултад монгол хэлээр ойлгомжтой хариу өгнө үү. Хариултаа товч бөгөөд үнэн зөв өгнө үү."
             },
             {
                 "role": "user",
@@ -55,7 +55,12 @@ def send_to_chatwoot(conversation_id, reply):
         "content": reply,
         "message_type": "outgoing"
     }
-    requests.post(url, json=payload, headers=headers)
+    response = requests.post(url, json=payload, headers=headers)
+
+    # ✅ Логлох
+    print(f"Chatwoot API status: {response.status_code}")
+    print(f"Chatwoot response: {response.text}")
+
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
