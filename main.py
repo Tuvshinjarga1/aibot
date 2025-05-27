@@ -12,7 +12,6 @@ app = FastAPI()
 OPENAI_API_KEY = os.getenv("OPENROUTER_API_KEY")
 ASSISTANT_ID = os.getenv("ASSISTANT_API_KEY")
 
-# 🧠 user_id -> {"thread_id": ..., "active_run": False}
 user_threads = {}
 
 class ChatwootRequest(BaseModel):
@@ -24,30 +23,26 @@ async def chatwoot_webhook(data: ChatwootRequest, request: Request):
     print("📥 Body from Chatwoot:", body)
 
     try:
-        # ✅ Get user_id from sender
         sender = body.get("sender") or body.get("meta", {}).get("sender")
         user_id = str(sender.get("id") if sender else "anonymous")
 
-        # 🧠 Manage thread per user
-        user_data = user_threads.get(user_id)
-        if not user_data or user_data.get("active_run", False):
+        if user_id not in user_threads:
             thread_id = await create_thread()
-            user_threads[user_id] = {"thread_id": thread_id, "active_run": False}
+            user_threads[user_id] = thread_id
             print(f"✅ New thread_id: {thread_id}")
         else:
-            thread_id = user_data["thread_id"]
+            thread_id = user_threads[user_id]
             print(f"🧵 Using thread_id={thread_id} for user={user_id}")
 
-        # ✉️ Send message
         content = body.get("content", data.content or "...")
         print("✉️ Sending message to assistant:", content)
 
-        reply = await get_assistant_response(content, thread_id, user_id)
-        return {"contentshdeee": reply}
+        reply = await get_assistant_response(content, thread_id)
+        return {"content": reply}
 
     except Exception as e:
         print("⚠️ Error while handling webhook:", e)
-        return {"content": "⚠️ Алдаа гарлаа. Дахин оролдоно уу."}
+        return {"content": "⚠️ Алдаа гарлаа."}
 
 
 async def create_thread() -> str:
@@ -63,9 +58,34 @@ async def create_thread() -> str:
         return res.json()["id"]
 
 
-async def get_assistant_response(message: str, thread_id: str, user_id: str) -> str:
+async def wait_for_active_run(thread_id: str):
     async with httpx.AsyncClient() as client:
-        # 1. Add message
+        while True:
+            res = await client.get(
+                f"https://api.openai.com/v1/threads/{thread_id}/runs",
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "OpenAI-Beta": "assistants=v2"
+                }
+            )
+            runs = res.json().get("data", [])
+            if not runs:
+                return
+
+            latest_run = runs[0]
+            if latest_run["status"] in ["queued", "in_progress"]:
+                print(f"⏳ Waiting for existing run {latest_run['id']} to finish...")
+                await asyncio.sleep(1)
+            else:
+                return
+
+
+async def get_assistant_response(message: str, thread_id: str) -> str:
+    async with httpx.AsyncClient() as client:
+        # Wait if active run exists
+        await wait_for_active_run(thread_id)
+
+        # Add message
         await client.post(
             f"https://api.openai.com/v1/threads/{thread_id}/messages",
             headers={
@@ -76,7 +96,7 @@ async def get_assistant_response(message: str, thread_id: str, user_id: str) -> 
             json={"role": "user", "content": message}
         )
 
-        # 2. Start a run
+        # Start run
         run_res = await client.post(
             f"https://api.openai.com/v1/threads/{thread_id}/runs",
             headers={
@@ -91,13 +111,9 @@ async def get_assistant_response(message: str, thread_id: str, user_id: str) -> 
         run_id = run_data.get("id")
         if not run_id:
             print("❌ Run creation failed:", run_data)
-            user_threads[user_id]["active_run"] = False
             return "⚠️ Хариу боловсруулах боломжгүй байна."
 
-        # Mark run as active
-        user_threads[user_id]["active_run"] = True
-
-        # 3. Wait until the run is completed
+        # Wait for run to complete
         while True:
             status_res = await client.get(
                 f"https://api.openai.com/v1/threads/{thread_id}/runs/{run_id}",
@@ -110,11 +126,10 @@ async def get_assistant_response(message: str, thread_id: str, user_id: str) -> 
             if status == "completed":
                 break
             elif status == "failed":
-                user_threads[user_id]["active_run"] = False
                 return "⚠️ Ассистант ажиллахад алдаа гарлаа."
             await asyncio.sleep(1)
 
-        # 4. Get messages
+        # Get final message
         messages_res = await client.get(
             f"https://api.openai.com/v1/threads/{thread_id}/messages",
             headers={
@@ -122,10 +137,5 @@ async def get_assistant_response(message: str, thread_id: str, user_id: str) -> 
                 "OpenAI-Beta": "assistants=v2"
             }
         )
-        user_threads[user_id]["active_run"] = False
-
         messages = messages_res.json().get("data", [])
-        if not messages:
-            return "⚠️ Хариу ирсэнгүй."
-
-        return messages[0]["content"][0]["text"]["value"]
+        return messages[0]["content"][0]["text"]["value"] if messages else "⚠️ Хариу ирсэнгүй."
