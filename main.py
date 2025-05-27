@@ -45,15 +45,19 @@ def webhook():
         return jsonify({"status":"skipped"}), 200
 
     conv_id = data["conversation"]["id"]
+    contact_id = data["sender"]["id"]  # Хэрэглэгчийн ID авах
     conv    = get_conversation(conv_id)
     attrs   = conv.get("custom_attributes", {})
-    thread_id = attrs.get("thread_id")
+    
+    # Хэрэглэгч тус бүрийн өөр thread_id үүсгэх
+    thread_key = f"thread_id_{contact_id}"
+    thread_id = attrs.get(thread_key)
 
     # thread_id байхгүй бол шинээр үүсгээд custom_attributes-д хадгална
     if not thread_id:
         thread = client.beta.threads.create()
         thread_id = thread.id
-        update_conversation(conv_id, {"thread_id": thread_id})
+        update_conversation(conv_id, {thread_key: thread_id})
 
     # Хэрэглэгчийн мессежийг thread руу нэмнэ
     client.beta.threads.messages.create(
