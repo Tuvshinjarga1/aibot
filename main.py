@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
@@ -22,7 +23,7 @@ for name, val in [
     if not val:
         raise RuntimeError(f"Орчны хувьсагч дутуу: {name}")
 
-# 🎛️ OpenAI Assistants клиент
+# OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 def send_to_chatwoot(conv_id, text):
@@ -38,40 +39,42 @@ def webhook():
     if data.get("message_type") != "incoming":
         return jsonify({"status": "skipped"})
 
-    # 1) Thread үүсгэх ба мессэж нэмэх
-    thread = client.beta.assistants.threads.create(assistant_id=ASSISTANT_ID)
-    thread_id = thread["id"]
-    client.beta.assistants.threads.messages.create(
-        assistant_id=ASSISTANT_ID,
+    # 1) Thread үүсгэх
+    thread = client.beta.threads.create()
+    thread_id = thread.id
+
+    # 2) Мессеж нэмэх
+    client.beta.threads.messages.create(
         thread_id=thread_id,
-        content=data["content"],
-        role="user"
+        role="user",
+        content=data["content"]
     )
 
-    # 2) Run үүсгэх
-    run = client.beta.assistants.runs.create(
+    # 3) Run эхлүүлэх
+    run = client.beta.threads.runs.create(
+        thread_id=thread_id,
         assistant_id=ASSISTANT_ID,
-        thread_id=thread_id
     )
-    run_id = run["id"]
-    # 3) Статус шалгах (тестэд товчоор poll хийх)
+
+    # 4) Run-г гүйцэт дуустал хүлээх (poll)
     while True:
-        status = client.beta.assistants.runs.get(
-            assistant_id=ASSISTANT_ID,
-            run_id=run_id
-        )["status"]
-        if status == "complete":
+        run_status = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+        if run_status.status == "completed":
+            break
+        time.sleep(1)
+
+    # 5) Хариултыг авах
+    messages = client.beta.threads.messages.list(thread_id=thread_id)
+    for msg in messages.data:
+        if msg.role == "assistant":
+            for part in msg.content:
+                if part.type == "text":
+                    reply = part.text.value
+                    send_to_chatwoot(data["conversation"]["id"], reply)
+                    break
             break
 
-    # 4) Хариултыг авч Chatwoot руу илгээх
-    messages = client.beta.assistants.threads.messages.list(
-        assistant_id=ASSISTANT_ID,
-        thread_id=thread_id
-    )
-    bot_reply = next(msg for msg in messages if msg["role"] == "assistant")["content"]
-    send_to_chatwoot(data["conversation"]["id"], bot_reply)
-
-    return jsonify({"status":"ok"})
+    return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
     app.run(port=5000)
