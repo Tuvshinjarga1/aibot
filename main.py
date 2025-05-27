@@ -15,7 +15,7 @@ GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 def ask_ai(message):
     url = "https://api.groq.com/openai/v1/chat/completions"
     payload = {
-        "model": "mixtral-8x7b-32768",  # эсвэл deepseek-chat
+        "model": "mixtral-8x7b-32768",
         "messages": [
             {"role": "user", "content": message}
         ]
@@ -25,7 +25,18 @@ def ask_ai(message):
         "Content-Type": "application/json"
     }
     response = requests.post(url, json=payload, headers=headers)
-    return response.json()['choices'][0]['message']['content']
+
+    try:
+        data = response.json()
+        if "choices" in data:
+            return data["choices"][0]["message"]["content"]
+        else:
+            print("⚠️ Groq API response error:", data)
+            return "AI бот хариу өгөх боломжгүй байна. Түр азнаад дахин оролдоно уу."
+    except Exception as e:
+        print("❌ JSON parse error:", e)
+        return "AI серверт холбогдож чадсангүй."
+
 
 def send_to_chatwoot(conversation_id, reply):
     url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/messages"
