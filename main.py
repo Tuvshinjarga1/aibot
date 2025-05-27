@@ -243,64 +243,94 @@ def verify_email():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """Chatwoot webhook handler"""
+    """Chatwoot webhook handler - бүрэн шинэ логик"""
     try:
         data = request.json
-        print(f"Webhook: {data}")
+        print(f"🔄 Webhook received: {data.get('message_type', 'unknown')}")
         
+        # Зөвхөн incoming мессеж боловсруулах
         if data.get("message_type") != "incoming":
-            return jsonify({"status": "skipped"}), 200
+            print("⏭️ Skipping: not incoming message")
+            return jsonify({"status": "skipped - not incoming"}), 200
 
+        # Үндсэн мэдээлэл авах
         conv_id = data["conversation"]["id"]
         message_content = data.get("content", "").strip()
         
-        # Contact ID авах
+        print(f"📝 Conv ID: {conv_id}, Message: '{message_content}'")
+        
+        # Contact ID олох
         contact_id = None
         if "sender" in data and data["sender"]:
             contact_id = data["sender"].get("id")
-        elif "contact" in data and data["contact"]:
-            contact_id = data["contact"].get("id")
         
         if not contact_id:
+            print("❌ Contact ID олдсонгүй")
             send_to_chatwoot(conv_id, "Алдаа: Хэрэглэгчийн мэдээлэл олдсонгүй.")
-            return jsonify({"status": "error"}), 400
+            return jsonify({"status": "error - no contact"}), 400
 
-        # Contact-аас баталгаажуулалтын статус шалгах
-        try:
-            contact = get_contact(contact_id)
-            contact_attrs = contact.get("custom_attributes", {})
-            
-            email_verified_value = contact_attrs.get("email_verified", False)
-            is_verified = str(email_verified_value).strip().lower() in ["true", "1", "yes"]
-            verified_email = contact_attrs.get("verified_email", "")
-            
-            print(f"=== Debug Info ===")
-            print(f"Contact ID: {contact_id}")
-            print(f"Raw email_verified value: {email_verified_value} (type: {type(email_verified_value)})")
-            print(f"Is verified: {is_verified}")
-            print(f"Verified email: {verified_email}")
-            print(f"Contact custom attributes: {contact_attrs}")
-            print(f"==================")
-            
-        except Exception as e:
-            print(f"Contact мэдээлэл авахад алдаа: {e}")
-            is_verified = False
+        print(f"👤 Contact ID: {contact_id}")
+
+        # ========== БАТАЛГААЖУУЛАЛТ ШАЛГАХ ==========
+        print("🔍 Баталгаажуулалт шалгаж байна...")
         
+        # Contact-ийн custom attributes авах (webhook-ээс шууд)
+        is_verified = False
+        verified_email = ""
+        
+        # Webhook дотор contact мэдээлэл байгаа эсэхийг шалгах
+        if "conversation" in data and "meta" in data["conversation"] and "sender" in data["conversation"]["meta"]:
+            sender_meta = data["conversation"]["meta"]["sender"]
+            if "custom_attributes" in sender_meta:
+                contact_attrs = sender_meta["custom_attributes"]
+                email_verified_value = contact_attrs.get("email_verified", "")
+                verified_email = contact_attrs.get("verified_email", "")
+                
+                # Баталгаажуулалт шалгах
+                is_verified = str(email_verified_value).lower() in ["true", "1", "yes"]
+                
+                print(f"📊 Webhook-ээс авсан: email_verified='{email_verified_value}', verified_email='{verified_email}'")
+                print(f"✅ Is verified: {is_verified}")
+        
+        # Хэрэв webhook дээр байхгүй бол API-аар дахин шалгах
         if not is_verified:
-            # Имэйл хаяг шаардах
+            print("🔍 API-аар дахин шалгаж байна...")
+            try:
+                contact = get_contact(contact_id)
+                contact_attrs = contact.get("custom_attributes", {})
+                email_verified_value = contact_attrs.get("email_verified", "")
+                verified_email = contact_attrs.get("verified_email", "")
+                
+                is_verified = str(email_verified_value).lower() in ["true", "1", "yes"]
+                print(f"📊 API-аас авсан: email_verified='{email_verified_value}', verified_email='{verified_email}'")
+                print(f"✅ Is verified: {is_verified}")
+            except Exception as e:
+                print(f"❌ API алдаа: {e}")
+                is_verified = False
+
+        # ========== БАТАЛГААЖУУЛАЛТЫН ҮЙЛДЭЛ ==========
+        if not is_verified:
+            print("🚫 Баталгаажуулаагүй - имэйл шаардаж байна")
+            
+            # Имэйл хаяг шалгах
             if is_valid_email(message_content):
-                # Имэйл хаяг зөв бол баталгаажуулах процесс эхлүүлэх
+                print(f"📧 Зөв имэйл: {message_content}")
+                
+                # Баталгаажуулах токен үүсгэх
                 token = generate_verification_token(message_content, conv_id, contact_id)
                 
+                # Имэйл илгээх
                 if send_verification_email(message_content, token):
                     send_to_chatwoot(conv_id, 
                         f"📧 Таны имэйл хаяг ({message_content}) рүү баталгаажуулах линк илгээлээ.\n\n"
                         "Имэйлээ шалгаад линк дээр дарна уу. Линк 24 цагийн дараа хүчингүй болно.\n\n"
                         "⚠️ Spam фолдерыг шалгахаа мартуузай!")
+                    print("✅ Имэйл амжилттай илгээлээ")
                 else:
                     send_to_chatwoot(conv_id, "❌ Имэйл илгээхэд алдаа гарлаа. Дахин оролдоно уу.")
+                    print("❌ Имэйл илгээхэд алдаа")
             else:
-                # Имэйл хаяг буруу бол зааварчилгаа өгөх
+                print(f"❌ Буруу имэйл формат: '{message_content}'")
                 send_to_chatwoot(conv_id, 
                     "👋 Сайн байна уу! Chatbot ашиглахын тулд эхлээд имэйл хаягаа баталгаажуулна уу.\n\n"
                     "📧 Зөв имэйл хаягаа бичээд илгээнэ үү.\n"
@@ -308,29 +338,38 @@ def webhook():
             
             return jsonify({"status": "waiting_verification"}), 200
 
-        # Хэрэглэгч баталгаажсан бол AI chatbot ажиллуулах
-        # Conversation level дээрх thread мэдээлэл авах
+        # ========== AI CHATBOT АЖИЛЛУУЛАХ ==========
+        print(f"🤖 Баталгаажсан хэрэглэгч ({verified_email}) - AI chatbot ажиллуулж байна")
+        
+        # Thread мэдээлэл авах
         conv = get_conversation(conv_id)
         conv_attrs = conv.get("custom_attributes", {})
         
         thread_key = f"openai_thread_{contact_id}"
         thread_id = conv_attrs.get(thread_key)
         
-        # Thread байхгүй бол шинээр үүсгэх
+        # Thread шинээр үүсгэх хэрэгтэй эсэхийг шалгах
         if not thread_id:
+            print("🧵 Шинэ thread үүсгэж байна...")
             thread = client.beta.threads.create()
             thread_id = thread.id
             update_conversation(conv_id, {thread_key: thread_id})
-            print(f"Шинэ thread үүсгэлээ: {thread_id}")
+            print(f"✅ Thread үүсгэлээ: {thread_id}")
+        else:
+            print(f"🧵 Одоо байгаа thread ашиглаж байна: {thread_id}")
 
-        # AI-аас хариулт авч Chatwoot руу илгээх
+        # AI хариулт авах
+        print("🤖 AI хариулт авч байна...")
         ai_response = get_ai_response(thread_id, message_content)
+        
+        # Chatwoot руу илгээх
         send_to_chatwoot(conv_id, ai_response)
+        print(f"✅ AI хариулт илгээлээ: {ai_response[:50]}...")
         
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        print(f"Webhook алдаа: {e}")
+        print(f"💥 Webhook алдаа: {e}")
         return jsonify({"status": f"error: {str(e)}"}), 500
 
 if __name__ == "__main__":
