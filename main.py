@@ -16,22 +16,17 @@ CHATWOOT_BASE_URL = "https://app.chatwoot.com"
 # OpenAI клиент
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Chatwoot helper-ууд
 def get_conversation(conv_id):
     url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}"
-    return requests.get(url, headers={"api_access_token": CHATWOOT_API_KEY}).json()
+    resp = requests.get(url, headers={"api_access_token": CHATWOOT_API_KEY})
+    data = resp.json()
+    # payload доторх conversation-ыг буцаана
+    return data["payload"]["conversation"]
 
 def update_conversation(conv_id, attrs):
     url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}"
     payload = {"conversation": {"custom_attributes": attrs}}
     return requests.put(url, json=payload, headers={"api_access_token": CHATWOOT_API_KEY})
-
-def send_to_chatwoot(conv_id, text):
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/messages"
-    headers = {"api_access_token": CHATWOOT_API_KEY}
-    payload = {"content": text, "message_type": "outgoing"}
-    r = requests.post(url, json=payload, headers=headers)
-    print("Chatwoot status:", r.status_code)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -40,26 +35,16 @@ def webhook():
         return jsonify({"status":"skipped"})
 
     conv_id = data["conversation"]["id"]
-    # Conversation-оос custom_attributes татаж авна
-    conv = requests.get(
-        f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}",
-        headers={"api_access_token": CHATWOOT_API_KEY}
-    ).json()
-    # direct custom_attributes-ийг аваад
+    conv = get_conversation(conv_id)
     attrs = conv.get("custom_attributes", {})
     thread_id = attrs.get("thread_id")
 
-    # Хэрвээ thread_id байхгүй бол шинээр үүсгээд хадгална
     if not thread_id:
+        # Шинэ thread үүсгэх
         thread = client.beta.threads.create()
         thread_id = thread.id
-
-        # ЗӨВ PUT payload!
-        requests.put(
-            f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}",
-            json={"conversation": {"custom_attributes": {"thread_id": thread_id}}},
-            headers={"api_access_token": CHATWOOT_API_KEY}
-        )
+        # custom_attributes-д хадгална
+        update_conversation(conv_id, {"thread_id": thread_id})
 
     # Хэрэглэгчийн мессежийг thread руу нэмнэ
     client.beta.threads.messages.create(
@@ -68,21 +53,26 @@ def webhook():
         content=data["content"]
     )
 
-    # Run үүсгэж хариулт авна (polling)
+    # Run үүсгээд хариулт хүлээх
     run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
-    while client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id).status != "completed":
+    while True:
+        status = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id).status
+        if status == "completed":
+            break
         time.sleep(1)
 
-    # Хариултыг авч Chatwoot руу илгээх
+    # Бүх мессежүүдийн дундаас хамгийн сүүлийн assistant хариултыг авна
     msgs = client.beta.threads.messages.list(thread_id=thread_id).data
-    reply = next(
-        block.text.value
-        for msg in msgs if msg.role=="assistant"
-        for block in msg.content if block.type=="text"
-    )
+    # reverse хийж сүүлийн assistant message-ийг авна
+    for msg in reversed(msgs):
+        if msg.role == "assistant":
+            # content нь list of blocks учир боломжит бүх text block-ээс нийлбэр гаргана
+            reply = "".join(
+                block.text.value
+                for block in msg.content
+                if block.type == "text"
+            )
+            break
+
     send_to_chatwoot(conv_id, reply)
-
     return jsonify({"status":"ok"})
-
-if __name__ == "__main__":
-    app.run(port=5000)
