@@ -40,51 +40,46 @@ def webhook():
         return jsonify({"status":"skipped"})
 
     conv_id = data["conversation"]["id"]
-    conv = get_conversation(conv_id)
+    # Conversation-оос custom_attributes татаж авна
+    conv = requests.get(
+        f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}",
+        headers={"api_access_token": CHATWOOT_API_KEY}
+    ).json()
     thread_id = conv["conversation"]["custom_attributes"].get("thread_id")
 
-    # Шинэ Thread үүсгэх эсвэл өмнөхөө үргэлжлүүлэх
+    # Хэрвээ thread_id байхгүй бол шинээр үүсгээд хадгална
     if not thread_id:
         thread = client.beta.threads.create()
         thread_id = thread.id
-        update_conversation(conv_id, {"thread_id": thread_id})
-        print(f"🆕 Created thread {thread_id} for conversation {conv_id}")
-    else:
-        print(f"↪️ Continuing thread {thread_id}")
+        # Хадгалах
+        requests.put(
+            f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}",
+            json={"conversation": {"custom_attributes": {"thread_id": thread_id}}},
+            headers={"api_access_token": CHATWOOT_API_KEY}
+        )
 
-    # Хэрэглэгчийн мессеж нэмэх
+    # Хэрэглэгчийн мессежийг thread руу нэмнэ
     client.beta.threads.messages.create(
         thread_id=thread_id,
         role="user",
         content=data["content"]
     )
 
-    # Run эхлүүлэх
-    run = client.beta.threads.runs.create(
-        thread_id=thread_id,
-        assistant_id=ASSISTANT_ID
-    )
-
-    # Run дуусахыг хүлээх
-    while True:
-        status = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id).status
-        if status == "completed":
-            break
+    # Run үүсгэж хариулт авна (polling)
+    run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
+    while client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id).status != "completed":
         time.sleep(1)
 
-    # Хариултыг авах
-    messages = client.beta.threads.messages.list(thread_id=thread_id).data
-    for msg in messages:
-        if msg.role == "assistant":
-            # content нь list of blocks
-            for block in msg.content:
-                if block.type == "text":
-                    reply = block.text.value
-                    send_to_chatwoot(conv_id, reply)
-                    break
-            break
+    # Хариултыг авч Chatwoot руу илгээх
+    msgs = client.beta.threads.messages.list(thread_id=thread_id).data
+    reply = next(
+        block.text.value
+        for msg in msgs if msg.role=="assistant"
+        for block in msg.content if block.type=="text"
+    )
+    send_to_chatwoot(conv_id, reply)
 
     return jsonify({"status":"ok"})
-
+    
 if __name__ == "__main__":
     app.run(port=5000)
