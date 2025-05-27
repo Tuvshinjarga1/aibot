@@ -63,12 +63,19 @@ def webhook():
     print("Webhook received:", data)
 
     try:
+        # 🛑 Зөвхөн хэрэглэгчийн ирсэн мессеж (message_type: 0) дээр ажиллана
+        if data.get('message_type') != 0:
+            print("⛔ Skip non-incoming message (e.g. outgoing bot reply)")
+            return jsonify({"status": "skipped"})
+
+        # 🟢 Эндээс эхлээд AI-д дамжуулах
         message = data['content']
         conversation_id = data['conversation']['id']
 
         ai_reply = ask_ai(message)
         send_to_chatwoot(conversation_id, ai_reply)
         return jsonify({"status": "ok"})
+
     except Exception as e:
         print("Error:", e)
         return jsonify({"status": "error", "message": str(e)}), 500
