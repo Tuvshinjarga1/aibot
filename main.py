@@ -17,13 +17,21 @@ def ask_ai(message):
     payload = {
         "model": "llama3-70b-8192",
         "messages": [
-            {"role": "user", "content": message}
+            {
+                "role": "system",
+                "content": "Та бол Монгол хэл дээр хариулдаг тусгай туслагч бөгөөд зөвхөн Cloud.mn вэбсайттай холбоотой асуултад ойлгомжтой, товч, хэрэгтэй мэдээлэл өгдөг."
+            },
+            {
+                "role": "user",
+                "content": message
+            }
         ]
     }
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
+
     response = requests.post(url, json=payload, headers=headers)
 
     try:
@@ -36,7 +44,6 @@ def ask_ai(message):
     except Exception as e:
         print("❌ JSON parse error:", e)
         return "AI серверт холбогдож чадсангүй."
-
 
 def send_to_chatwoot(conversation_id, reply):
     url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/messages"
