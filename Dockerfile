@@ -1,18 +1,18 @@
-# Python суурьтай зураг ашиглана
+# Python суурьтай зураг
 FROM python:3.10-slim
 
-# Ажиллах директор үүсгэнэ
+# Ажиллах директор үүсгэх
 WORKDIR /app
 
-# Requirements болон app файлуудыг хуулах
+# Шаардлагатай файлуудыг хуулж суулгах
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# App source-г хуулах
+# App source-г хуулна
 COPY . .
 
-# PORT тохируулах
+# Порт нээх (gunicorn default: 8000)
 EXPOSE 8000
 
-# FastAPI-г ажиллуулах
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Flask + Gunicorn ажиллуулах
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "main:app"]
