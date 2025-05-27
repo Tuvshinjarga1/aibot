@@ -38,7 +38,7 @@ async def chatwoot_webhook(data: ChatwootRequest, request: Request):
 
         content = body.get("content", "...")
         print("✉️ Sending message to assistant:", content)
-
+        print("TEST")
         # 🤖 Хариу авах
         reply = await get_assistant_response(content, thread_id)
         return {"content": reply}
