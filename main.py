@@ -19,22 +19,33 @@ class ChatwootRequest(BaseModel):
 
 @app.post("/api/chatwoot")
 async def chatwoot_webhook(data: ChatwootRequest, request: Request):
-    user_input = data.content
     body = await request.json()
-
-    # 📌 User ID олгох (хэрэглэгч тус бүрд thread үүсгэх)
-    user_id = str(body.get("sender", {}).get("id", "anonymous"))
     print("📥 Body from Chatwoot:", body)
 
-    # Thread үүсгэх/ашиглах
-    thread_id = user_threads.get(user_id)
-    if not thread_id:
-        thread_id = await create_thread()
-        user_threads[user_id] = thread_id
+    try:
+        # ✅ Хэрэв sender байхгүй бол 'anonymous' ашиглах
+        sender = body.get("sender") or body.get("meta", {}).get("sender")
+        user_id = str(sender.get("id") if sender else "anonymous")
 
-    # Хариу авах
-    reply = await get_assistant_response(user_input, thread_id)
-    return {"content": reply}
+        # 🧠 Thread олгох
+        if user_id not in user_threads:
+            thread_id = await create_thread()
+            user_threads[user_id] = thread_id
+            print(f"✅ New thread_id: {thread_id}")
+        else:
+            thread_id = user_threads[user_id]
+            print(f"🧵 Using thread_id={thread_id} for user={user_id}")
+
+        content = body.get("content", "...")
+        print("✉️ Sending message to assistant:", content)
+
+        # 🤖 Хариу авах
+        reply = await get_assistant_response(content, thread_id)
+        return {"content": reply}
+
+    except Exception as e:
+        print("⚠️ Error while handling webhook:", e)
+        return {"content": "Алдаа гарлаа."}
 
 async def create_thread() -> str:
     async with httpx.AsyncClient() as client:
