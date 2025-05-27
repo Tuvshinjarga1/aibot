@@ -1,4 +1,6 @@
 flask
-requests
-gunicorn
 openai
+requests
+PyJWT
+python-dotenv
+gunicorn
