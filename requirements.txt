@@ -3,5 +3,5 @@ uvicorn
 httpx
 python-dotenv
 flask
-request
+requests
 jsonify
