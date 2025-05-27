@@ -12,7 +12,7 @@ app = FastAPI()
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 ASSISTANT_ID = os.getenv("ASSISTANT_API_KEY")
 
-# Түр хадгалах (demo) — production-д бол Redis/DB-р солих
+# Туршилтын зориулалт — production-д бол Redis/DB-р хадгална
 user_threads: dict[str,str] = {}
 
 @app.post("/api/chatwoot")
@@ -20,39 +20,40 @@ async def chatwoot_webhook(request: Request):
     body = await request.json()
     print("📥 Body from Chatwoot:", body)
 
-    # 1) Зөвхөн “incoming” message_type дээр ажиллана
-    if body.get("message_type") != "incoming":
-        return {}  # Бусад үйлдлийг алгасана
+    # 1) Зөвхөн хэрэглэгчээс ирсэн мессеж дээр ажиллана
+    if body.get("message_type") != "incoming" or body.get("event") != "message_created":
+        # Чатбот хариу өгөх шаардлагагүй event
+        return {"content": ""}
 
-    # 2) Хэрэглэгчийн ID-г meta.sender эсвэл top-level sender-аас авна
-    #    (чанартай нь meta.sender.id — Chatwoot v2.10+)
-    user_id = (
-        str(body.get("meta", {}).get("sender", {}).get("id"))
-        if body.get("meta", {}).get("sender")
-        else str(body.get("sender", {}).get("id", "anonymous"))
-    )
-
-    # 3) Хэрэглэгчийн бичсэн текст
-    content = body.get("content", "").strip()
-    if not content:
-        return {"content": "⚠️ Мессеж хоосон байна."}
-
-    # 4) Өмнө үүсгэсэн thread_id байгаа эсэхийг шалгаад үүсгэх
-    if user_id not in user_threads:
-        user_threads[user_id] = await create_new_thread()
-    thread_id = user_threads[user_id]
-
-    # 5) AI-д текст дамжуулж, хариу авна
     try:
+        # 2) Хэрэглэгчийн ID-г meta.sender.id-аас авна
+        user_id = str(body.get("meta", {})
+                          .get("sender", {})
+                          .get("id", "anonymous"))
+        # 3) Хэрэглэгчийн бичсэн текст
+        content = body.get("content", "").strip()
+        if not content:
+            return {"content": "⚠️ Мессеж хоосон байна."}
+
+        # 4) Thread ID олгох/үсгэх
+        if user_id not in user_threads:
+            user_threads[user_id] = await create_new_thread()
+        thread_id = user_threads[user_id]
+        print(f"🧵 Using thread_id={thread_id} for user={user_id}")
+
+        # 5) AI-д дамжуулж хариу авах
         reply = await get_assistant_response(content, thread_id)
+        print("🤖 AI Reply:", reply)
         return {"content": reply}
+
     except Exception:
-        import traceback
         traceback.print_exc()
-        return {"content": "💥 AI-д хандахад алдаа гарлаа."}
+        # Алдаа гарсан ч хоосон биш fallback өгнө
+        return {"content": "💥 Хариу боловсруулах үед алдаа гарлаа."}
 
 
 async def create_new_thread() -> str:
+    print("➕ Creating new thread...")
     async with httpx.AsyncClient() as client:
         res = await client.post(
             "https://api.openai.com/v1/threads",
@@ -63,13 +64,16 @@ async def create_new_thread() -> str:
             },
         )
         res.raise_for_status()
-        return res.json()["id"]
+        thread_id = res.json()["id"]
+        print("✅ New thread_id:", thread_id)
+        return thread_id
 
 
 async def get_assistant_response(message: str, thread_id: str) -> str:
+    print("✉️ Sending message to assistant:", message)
     async with httpx.AsyncClient() as client:
-        # a) Хэрэглэгчийн текст нэмэх
-        await client.post(
+        # а) Хэрэглэгчийн текст нэмэх
+        m_res = await client.post(
             f"https://api.openai.com/v1/threads/{thread_id}/messages",
             headers={
                 "Authorization": f"Bearer {API_KEY}",
@@ -78,8 +82,9 @@ async def get_assistant_response(message: str, thread_id: str) -> str:
             },
             json={"role": "user", "content": message},
         )
+        m_res.raise_for_status()
 
-        # b) Run үүсгэх
+        # б) Run эхлүүлэх
         run_res = await client.post(
             f"https://api.openai.com/v1/threads/{thread_id}/runs",
             headers={
@@ -90,32 +95,38 @@ async def get_assistant_response(message: str, thread_id: str) -> str:
             json={"assistant_id": ASSISTANT_ID},
         )
         run_data = run_res.json()
+        print("🛠 Run response:", run_data)
         if "id" not in run_data:
-            print("❌ Run эхлүүлэхэд алдаа:", run_data)
+            # Алдаа заагч fallback
             return "⚠️ AI run эхлэхэд алдаа гарлаа."
         run_id = run_data["id"]
 
-        # c) Run дуусахыг polling
+        # в) Run дуусахыг хүлээх (poll)
+        print("⏳ Polling for run to complete...")
         while True:
-            status = (await client.get(
+            status_res = await client.get(
                 f"https://api.openai.com/v1/threads/{thread_id}/runs/{run_id}",
                 headers={
                     "Authorization": f"Bearer {API_KEY}",
                     "OpenAI-Beta": "assistants=v2",
                     "Content-Type": "application/json",
                 },
-            )).json()["status"]
+            )
+            status = status_res.json().get("status")
             if status == "completed":
                 break
             await asyncio.sleep(1)
 
-        # d) AI хариуг унших
-        messages = (await client.get(
+        # г) AI хариуг унших
+        msg_res = await client.get(
             f"https://api.openai.com/v1/threads/{thread_id}/messages",
             headers={
                 "Authorization": f"Bearer {API_KEY}",
                 "OpenAI-Beta": "assistants=v2",
                 "Content-Type": "application/json",
             },
-        )).json()["data"]
-        return messages[0]["content"][0]["text"]["value"]
+        )
+        data = msg_res.json().get("data", [])
+        if data and data[0].get("content"):
+            return data[0]["content"][0]["text"]["value"]
+        return "🤔 Яг хариу олдсонгүй."
