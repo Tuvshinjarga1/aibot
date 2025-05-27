@@ -36,7 +36,9 @@ async def chatwoot_webhook(request: Request, body: dict = Body(...)):
             print(f"🧵 Using thread_id={thread_id} for user={user_id}")
 
         print("✉️ Sending message to assistant:", content)
-        reply = await get_assistant_response(content, thread_id)
+        reply = "test hariu irsn shdee"
+        print(reply + "testasdfsadfasdasdfasdf")
+        # reply = await get_assistant_response(content, thread_id)
         return {"content": reply}
 
     except Exception as e:
