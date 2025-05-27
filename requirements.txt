@@ -1,7 +1,3 @@
-fastapi
-uvicorn
-httpx
-python-dotenv
 flask
 requests
-jsonify
+gunicorn
