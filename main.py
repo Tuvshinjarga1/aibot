@@ -25,6 +25,11 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SENDER_EMAIL = os.environ["SENDER_EMAIL"]
 SENDER_PASSWORD = os.environ["SENDER_PASSWORD"]
 
+# Microsoft Teams тохиргоо
+TEAMS_WEBHOOK_URL = os.environ.get("TEAMS_WEBHOOK_URL")
+ESCALATE_TO_HUMAN_KEYWORDS = ["ажилтан", "хүн", "дуудаад өг", "холбоод өг", "тусламж", "туслаач", "ярилцмаар", "manager", "supervisor"]
+MAX_AI_RETRIES = 2  # AI хэдэн удаа оролдсоны дараа ажилтанд хуваарилах
+
 # JWT тохиргоо
 JWT_SECRET = os.environ.get("JWT_SECRET", "your-secret-key-here")
 VERIFICATION_URL_BASE = os.environ.get("VERIFICATION_URL_BASE", "http://localhost:5000")
@@ -132,7 +137,84 @@ def send_to_chatwoot(conv_id, text):
     r = requests.post(url, json=payload, headers=headers)
     r.raise_for_status()
 
-def get_ai_response(thread_id, message_content):
+def send_teams_notification(conv_id, customer_message, customer_email=None, escalation_reason="AI хариулт олдсонгүй"):
+    """Microsoft Teams руу ажилтанд мэдээлэх"""
+    if not TEAMS_WEBHOOK_URL:
+        print("⚠️ Teams webhook URL тохируулаагүй байна")
+        return False
+    
+    try:
+        # Chatwoot conversation URL
+        conv_url = f"{CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conv_id}"
+        
+        # Teams message format
+        teams_message = {
+            "type": "message",
+            "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.3",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "text": "🚨 Хэрэглэгч ажилтантай холбогдохыг хүсч байна",
+                            "weight": "Bolder",
+                            "size": "Medium",
+                            "color": "Attention"
+                        },
+                        {
+                            "type": "FactSet",
+                            "facts": [
+                                {
+                                    "title": "Шалтгаан:",
+                                    "value": escalation_reason
+                                },
+                                {
+                                    "title": "Харилцагч:",
+                                    "value": customer_email or "Тодорхойгүй"
+                                },
+                                {
+                                    "title": "Мессеж:",
+                                    "value": customer_message[:200] + ("..." if len(customer_message) > 200 else "")
+                                },
+                                {
+                                    "title": "Хугацаа:",
+                                    "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                }
+                            ]
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "type": "Action.OpenUrl",
+                            "title": "Chatwoot дээр харах",
+                            "url": conv_url
+                        }
+                    ]
+                }
+            }]
+        }
+        
+        response = requests.post(TEAMS_WEBHOOK_URL, json=teams_message)
+        response.raise_for_status()
+        print(f"✅ Teams мэдээлэл илгээлээ: {escalation_reason}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Teams мэдээлэл илгээхэд алдаа: {e}")
+        return False
+
+def check_escalation_keywords(message):
+    """Хэрэглэгчийн мессежээс ажилтан дуудах keyword-үүд байгаа эсэхийг шалгах"""
+    message_lower = message.lower()
+    for keyword in ESCALATE_TO_HUMAN_KEYWORDS:
+        if keyword in message_lower:
+            return True, keyword
+    return False, None
+
+def get_ai_response(thread_id, message_content, conv_id=None, customer_email=None, retry_count=0):
     """OpenAI Assistant-ээс хариулт авах"""
     try:
         # Хэрэглэгчийн мессежийг thread руу нэмэх
@@ -160,13 +242,35 @@ def get_ai_response(thread_id, message_content):
             if run_status.status == "completed":
                 break
             elif run_status.status in ["failed", "cancelled", "expired"]:
-                return "Уучлаарай, алдаа гарлаа. Дахин оролдоно уу."
+                error_msg = "Уучлаарай, алдаа гарлаа. Дахин оролдоно уу."
+                
+                # Teams мэдээлэх (хэрэв эхний удаагийн алдаа бол)
+                if retry_count == 0 and conv_id:
+                    send_teams_notification(
+                        conv_id, 
+                        message_content, 
+                        customer_email, 
+                        f"AI run алдаа: {run_status.status}"
+                    )
+                
+                return error_msg
                 
             time.sleep(1)
             wait_count += 1
 
         if wait_count >= max_wait:
-            return "Хариулахад хэт удаж байна. Дахин оролдоно уу."
+            timeout_msg = "Хариулахад хэт удаж байна. Дахин оролдоно уу."
+            
+            # Teams мэдээлэх (хэрэв эхний удаагийн timeout бол)
+            if retry_count == 0 and conv_id:
+                send_teams_notification(
+                    conv_id, 
+                    message_content, 
+                    customer_email, 
+                    "AI хариулт timeout"
+                )
+            
+            return timeout_msg
 
         # Assistant-ийн хариультыг авах
         messages = client.beta.threads.messages.list(thread_id=thread_id)
@@ -179,11 +283,34 @@ def get_ai_response(thread_id, message_content):
                         reply += content_block.text.value
                 return reply
 
-        return "Хариулт олдсонгүй. Дахин оролдоно уу."
+        # Хариулт олдохгүй
+        no_response_msg = "Хариулт олдсонгүй. Дахин оролдоно уу."
+        
+        # Teams мэдээлэх (хэрэв эхний удаагийн алдаа бол)
+        if retry_count == 0 and conv_id:
+            send_teams_notification(
+                conv_id, 
+                message_content, 
+                customer_email, 
+                "AI хариулт олдсонгүй"
+            )
+        
+        return no_response_msg
         
     except Exception as e:
         print(f"AI хариулт авахад алдаа: {e}")
-        return "Уучлаарай, алдаа гарлаа. Дахин оролдоно уу."
+        error_msg = "Уучлаарай, алдаа гарлаа. Дахин оролдоно уу."
+        
+        # Teams мэдээлэх (хэрэв эхний удаагийн алдаа бол)
+        if retry_count == 0 and conv_id:
+            send_teams_notification(
+                conv_id, 
+                message_content, 
+                customer_email, 
+                f"AI системийн алдаа: {str(e)}"
+            )
+        
+        return error_msg
 
 @app.route("/verify", methods=["GET"])
 def verify_email():
@@ -341,6 +468,26 @@ def webhook():
         # ========== AI CHATBOT АЖИЛЛУУЛАХ ==========
         print(f"🤖 Баталгаажсан хэрэглэгч ({verified_email}) - AI chatbot ажиллуулж байна")
         
+        # Эхлээд keyword шалгах (хэрэглэгч ажилтан дуудаж байгаа эсэх)
+        needs_human, found_keyword = check_escalation_keywords(message_content)
+        if needs_human:
+            print(f"🚨 Ажилтан дуудах keyword олдлоо: '{found_keyword}'")
+            
+            # Teams-ээр мэдээлэх
+            send_teams_notification(
+                conv_id, 
+                message_content, 
+                verified_email, 
+                f"Хэрэглэгч ажилтан хүслээ ('{found_keyword}')"
+            )
+            
+            # Хэрэглэгчид мэдээлэх
+            send_to_chatwoot(conv_id, 
+                "👋 Би таны хүсэлтийг ажилтанд дамжуулаа. Удахгүй ажилтан тантай холбогдоно.\n\n"
+                "🕐 Түр хүлээнэ үү...")
+            
+            return jsonify({"status": "escalated_to_human"}), 200
+        
         # Thread мэдээлэл авах
         conv = get_conversation(conv_id)
         conv_attrs = conv.get("custom_attributes", {})
@@ -358,9 +505,42 @@ def webhook():
         else:
             print(f"🧵 Одоо байгаа thread ашиглаж байна: {thread_id}")
 
-        # AI хариулт авах
+        # AI хариулт авах (retry logic-той)
         print("🤖 AI хариулт авч байна...")
-        ai_response = get_ai_response(thread_id, message_content)
+        
+        retry_count = 0
+        ai_response = None
+        
+        while retry_count <= MAX_AI_RETRIES:
+            ai_response = get_ai_response(thread_id, message_content, conv_id, verified_email, retry_count)
+            
+            # Хэрэв алдаатай хариулт биш бол амжилттай
+            if not any(error_phrase in ai_response for error_phrase in [
+                "алдаа гарлаа", "хэт удаж байна", "олдсонгүй"
+            ]):
+                break
+                
+            retry_count += 1
+            if retry_count <= MAX_AI_RETRIES:
+                print(f"🔄 AI дахин оролдож байна... ({retry_count}/{MAX_AI_RETRIES})")
+                time.sleep(2)  # 2 секунд хүлээх
+        
+        # Хэрэв бүх оролдлого бүтэлгүйтвэл ажилтанд хуваарилах
+        if retry_count > MAX_AI_RETRIES:
+            print("❌ AI-ийн бүх оролдлого бүтэлгүйтэв - ажилтанд хуваарилж байна")
+            
+            send_teams_notification(
+                conv_id, 
+                message_content, 
+                verified_email, 
+                f"AI {MAX_AI_RETRIES + 1} удаа алдаа гаргалаа"
+            )
+            
+            ai_response = (
+                "🚨 Уучлаарай, техникийн асуудал гарлаа.\n\n"
+                "Би таны асуултыг ажилтанд дамжуулаа. Удахгүй ажилтан тантай холбогдоно.\n\n"
+                "🕐 Түр хүлээнэ үү..."
+            )
         
         # Chatwoot руу илгээх
         send_to_chatwoot(conv_id, ai_response)
@@ -372,30 +552,28 @@ def webhook():
         print(f"💥 Webhook алдаа: {e}")
         return jsonify({"status": f"error: {str(e)}"}), 500
 
-@app.route("/bot/teams", methods=["POST"])
-def teams_bot_handler():
-    data = request.json
-    print(f"📩 Teams message received: {data}")
-
-    # Teams-с ирсэн мессежээс текст авах
-    user_text = data.get("text", "").strip()
-    if not user_text:
-        return jsonify({"type": "message", "text": "⚠️ Мессеж хоосон байна."}), 200
-
-    # ⚠️ Та энд conv_id-г өөрийн системтэй уях логик оруулж болно
-    conv_id = os.environ.get("DEFAULT_CONV_ID")  # эсвэл API-р харгалзах conv_id олж болно
-
-    if not conv_id:
-        return jsonify({"type": "message", "text": "❌ Conv ID тохируулаагүй байна."}), 200
-
-    # Chatwoot руу agent хариу илгээх
+@app.route("/test-teams", methods=["GET"])
+def test_teams():
+    """Teams webhook тест хийх"""
+    if not TEAMS_WEBHOOK_URL:
+        return jsonify({"error": "TEAMS_WEBHOOK_URL тохируулаагүй байна"}), 400
+    
     try:
-        send_to_chatwoot(conv_id, f"💬 Teams Agent: {user_text}")
-        return jsonify({"type": "message", "text": "✅ Chatwoot руу илгээлээ!"}), 200
+        # Тест мэдээлэл илгээх
+        success = send_teams_notification(
+            conv_id="test_123",
+            customer_message="Энэ тест мэдээлэл юм. Teams холболт ажиллаж байгаа эсэхийг шалгаж байна.",
+            customer_email="test@example.com",
+            escalation_reason="Teams webhook тест"
+        )
+        
+        if success:
+            return jsonify({"status": "success", "message": "Teams мэдээлэл амжилттай илгээлээ!"}), 200
+        else:
+            return jsonify({"error": "Teams мэдээлэл илгээхэд алдаа"}), 500
+            
     except Exception as e:
-        print(f"❌ Chatwoot-д илгээхэд алдаа: {e}")
-        return jsonify({"type": "message", "text": "❌ Chatwoot руу илгээж чадсангүй."}), 200
-
+        return jsonify({"error": f"Алдаа: {str(e)}"}), 500
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)

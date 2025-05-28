@@ -6,15 +6,21 @@ ASSISTANT_ID=your_assistant_id_here
 CHATWOOT_API_KEY=your_chatwoot_api_key_here
 ACCOUNT_ID=your_account_id_here
 
-# Имэйл тохиргоо (Gmail жишээ)
-SENDER_EMAIL=your_gmail@gmail.com
+# Email тохиргоо
+SENDER_EMAIL=your_email@gmail.com
 SENDER_PASSWORD=your_app_password_here
 SMTP_SERVER=smtp.gmail.com
 SMTP_PORT=587
 
-# JWT болон URL тохиргоо
-JWT_SECRET=your_very_secure_secret_key_here
-VERIFICATION_URL_BASE=http://localhost:5000
+# Microsoft Teams тохиргоо
+TEAMS_WEBHOOK_URL=https://your-org.webhook.office.com/webhookb2/...
+
+# JWT тохиргоо
+JWT_SECRET=your-super-secret-jwt-key-here
+VERIFICATION_URL_BASE=https://your-domain.com
+
+# Flask тохиргоо
+FLASK_ENV=production
 
 # Production дээр:
 # VERIFICATION_URL_BASE=https://yourdomain.com 
