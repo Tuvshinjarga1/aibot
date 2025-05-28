@@ -10,6 +10,26 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
 
+# RAG системийн импорт нэмэх
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urldefrag
+from dotenv import load_dotenv
+import logging
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain.chains import RetrievalQA
+from langchain.schema import Document
+from langchain_openai import OpenAI as LC_OpenAI
+from langchain.prompts import PromptTemplate
+
+# Load .env
+load_dotenv()
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
 
 # Орчны хувьсагчид
@@ -18,6 +38,10 @@ ASSISTANT_ID      = os.environ["ASSISTANT_ID"]
 CHATWOOT_API_KEY  = os.environ["CHATWOOT_API_KEY"]
 ACCOUNT_ID        = os.environ["ACCOUNT_ID"]
 CHATWOOT_BASE_URL = "https://app.chatwoot.com"
+
+# RAG системийн тохиргоо
+DOCS_BASE_URL = os.environ.get("DOCS_BASE_URL", "https://docs.cloud.mn")
+VECTOR_STORE_PATH = "docs_faiss_index"
 
 # Email тохиргоо
 SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
@@ -35,6 +59,209 @@ VERIFICATION_URL_BASE = os.environ.get("VERIFICATION_URL_BASE", "http://localhos
 
 # OpenAI клиент
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+# =============== RAG СИСТЕМИЙН ФУНКЦУУД ===============
+
+def crawl_docs(base_url: str) -> list:
+    """Документ сайтаас мэдээлэл цуглуулах"""
+    seen = set()
+    to_visit = {base_url}
+    docs = []
+    
+    logger.info(f"Starting to crawl docs from {base_url}")
+    
+    while to_visit:
+        url = to_visit.pop()
+        url = urldefrag(url).url
+        if url in seen or not url.startswith(base_url):
+            continue
+        seen.add(url)
+        
+        try:
+            logger.info(f"Crawling: {url}")
+            resp = requests.get(url, timeout=15)
+            if resp.status_code != 200:
+                logger.warning(f"Failed to fetch {url}: {resp.status_code}")
+                continue
+                
+            soup = BeautifulSoup(resp.text, "lxml")
+            
+            # Better content extraction - try multiple selectors
+            content = (
+                soup.select_one("article") or 
+                soup.select_one(".content") or
+                soup.select_one("main") or
+                soup.select_one(".markdown") or
+                soup.select_one("#main-content")
+            )
+            
+            if content:
+                # Remove navigation, footer, header elements
+                for unwanted in content.select("nav, footer, header, .nav, .footer, .header"):
+                    unwanted.decompose()
+                
+                text = content.get_text(separator="\n").strip()
+                if text and len(text) > 50:  # Filter out very short content
+                    # Get page title for better context
+                    title = soup.select_one("title")
+                    title_text = title.get_text().strip() if title else ""
+                    
+                    docs.append({
+                        "url": url, 
+                        "text": text,
+                        "title": title_text
+                    })
+                    logger.info(f"Extracted content from {url} - {len(text)} characters")
+                    
+            # Find more links
+            for a in soup.find_all("a", href=True):
+                link = urljoin(url, a["href"])
+                if link.startswith(base_url) and "#" not in link:  # Avoid anchor links
+                    to_visit.add(link)
+                    
+        except Exception as e:
+            logger.error(f"Error crawling {url}: {str(e)}")
+            continue
+            
+    logger.info(f"Crawling completed. Found {len(docs)} documents")
+    return docs
+
+def chunk_documents(documents: list) -> list:
+    """Документуудыг жижиг хэсэгт хуваах"""
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,  # Reduced chunk size to fit token limit
+        chunk_overlap=50,  # Reduced overlap
+        separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
+    )
+    
+    chunks = []
+    for doc in documents:
+        text_chunks = splitter.split_text(doc["text"])
+        for i, chunk in enumerate(text_chunks):
+            # Create proper Document objects with metadata
+            doc_obj = Document(
+                page_content=chunk,
+                metadata={
+                    "source": doc["url"],
+                    "title": doc.get("title", ""),
+                    "chunk_id": i
+                }
+            )
+            chunks.append(doc_obj)
+    
+    logger.info(f"Created {len(chunks)} chunks from {len(documents)} documents")
+    return chunks
+
+def load_vectorstore():
+    """Vector store ачаалах эсвэл шинээр үүсгэх"""
+    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+    
+    if os.path.exists(VECTOR_STORE_PATH):
+        logger.info("Loading existing vector store...")
+        return FAISS.load_local(VECTOR_STORE_PATH, embeddings, allow_dangerous_deserialization=True)
+    
+    logger.info("Creating new vector store...")
+    docs = crawl_docs(DOCS_BASE_URL)
+    
+    if not docs:
+        raise ValueError("No documents found during crawling")
+    
+    chunks = chunk_documents(docs)
+    vs = FAISS.from_documents(chunks, embeddings)
+    vs.save_local(VECTOR_STORE_PATH)
+    logger.info("Vector store created and saved")
+    return vs
+
+# Custom prompt for CloudMN docs
+CUSTOM_PROMPT = PromptTemplate(
+    template="""CloudMN техникийн туслах. Доорх мэдээллээр хариулна уу:
+
+Мэдээлэл: {context}
+
+Асуулт: {question}
+
+Хариулт (монгол хэлээр, товч бөгөөд тодорхой):""",
+    input_variables=["context", "question"]
+)
+
+def search_docs_with_rag(question: str) -> dict:
+    """RAG ашиглан документаас хариулт хайх"""
+    try:
+        if not qa_chain:
+            return {
+                "answer": "Документ хайлтын систем бэлэн биш байна.",
+                "sources": []
+            }
+        
+        # Get answer with source documents
+        result = qa_chain.invoke({"query": question})
+        answer = result["result"]
+        sources = result.get("source_documents", [])
+        
+        # Format response with sources
+        response = {
+            "answer": answer,
+            "sources": []
+        }
+        
+        # Add unique sources (limit to 3)
+        seen_sources = set()
+        for doc in sources[:3]:  # Limit sources
+            source_url = doc.metadata.get("source", "")
+            if source_url and source_url not in seen_sources:
+                seen_sources.add(source_url)
+                response["sources"].append({
+                    "url": source_url,
+                    "title": doc.metadata.get("title", "")
+                })
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"RAG хайлтанд алдаа: {str(e)}")
+        return {
+            "answer": f"Документ хайлтанд алдаа гарлаа: {str(e)}",
+            "sources": []
+        }
+
+def is_docs_question(message: str) -> bool:
+    """Мессеж нь документын асуулт мөн эсэхийг шалгах"""
+    docs_keywords = [
+        "документ", "заавар", "manual", "гайд", "guide", "хэрхэн", "tutorial",
+        "API", "docs", "documentation", "хичээл", "зөвлөгөө", "жишээ",
+        "код", "code", "function", "method", "класс", "class", "модуль"
+    ]
+    
+    message_lower = message.lower()
+    return any(keyword in message_lower for keyword in docs_keywords)
+
+# Initialize RAG system
+try:
+    vectorstore = load_vectorstore()
+    retriever = vectorstore.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": 3}
+    )
+    
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=LC_OpenAI(
+            openai_api_key=OPENAI_API_KEY, 
+            temperature=0.1,
+            max_tokens=500,
+            model_name="gpt-3.5-turbo-instruct"
+        ),
+        chain_type="stuff",
+        retriever=retriever,
+        chain_type_kwargs={"prompt": CUSTOM_PROMPT},
+        return_source_documents=True
+    )
+    logger.info("RAG system initialized successfully")
+    
+except Exception as e:
+    logger.error(f"Failed to initialize RAG system: {str(e)}")
+    qa_chain = None
+
+# =============== CHATWOOT ФУНКЦУУД ===============
 
 def is_valid_email(email):
     """Имэйл хаягийн форматыг шалгах"""
@@ -561,67 +788,105 @@ def webhook():
         # ========== AI CHATBOT АЖИЛЛУУЛАХ ==========
         print(f"🤖 Баталгаажсан хэрэглэгч ({verified_email}) - AI chatbot ажиллуулж байна")
         
-        # Thread мэдээлэл авах
-        conv = get_conversation(conv_id)
-        conv_attrs = conv.get("custom_attributes", {})
+        # ========== RAG СИСТЕМЭЭР ДОКУМЕНТ ХАЙЛТ ==========
+        print("📚 Документ хайлт хийж байна...")
         
-        thread_key = f"openai_thread_{contact_id}"
-        thread_id = conv_attrs.get(thread_key)
-        
-        # Thread шинээр үүсгэх хэрэгтэй эсэхийг шалгах
-        if not thread_id:
-            print("🧵 Шинэ thread үүсгэж байна...")
-            thread = client.beta.threads.create()
-            thread_id = thread.id
-            update_conversation(conv_id, {thread_key: thread_id})
-            print(f"✅ Thread үүсгэлээ: {thread_id}")
-        else:
-            print(f"✅ Одоо байгаа thread ашиглаж байна: {thread_id}")
-
-        # AI хариулт авах (retry logic-той)
-        print("🤖 AI хариулт авч байна...")
-        
-        retry_count = 0
         ai_response = None
+        used_rag = False
         
-        while retry_count <= MAX_AI_RETRIES:
-            ai_response = get_ai_response(thread_id, message_content, conv_id, verified_email, retry_count)
+        # Хэрэв документын асуулт бол RAG ашиглах
+        if is_docs_question(message_content):
+            print("📖 Документын асуулт илэрлээ - RAG системээр хариулж байна")
             
-            # Хэрэв алдаатай хариулт биш бол амжилттай
-            if not any(error_phrase in ai_response for error_phrase in [
-                "алдаа гарлаа", "хэт удаж байна", "олдсонгүй"
-            ]):
-                break
+            # RAG-аар хариулт хайх
+            rag_result = search_docs_with_rag(message_content)
+            
+            if rag_result["answer"] and "алдаа гарлаа" not in rag_result["answer"]:
+                # RAG хариултыг форматлах
+                ai_response = rag_result["answer"]
                 
-            retry_count += 1
-            if retry_count <= MAX_AI_RETRIES:
-                print(f"🔄 AI дахин оролдож байна... ({retry_count}/{MAX_AI_RETRIES})")
-                time.sleep(2)  # 2 секунд хүлээх
+                # Source links нэмэх
+                if rag_result["sources"]:
+                    ai_response += "\n\n📚 **Холбогдох документууд:**\n"
+                    for i, source in enumerate(rag_result["sources"], 1):
+                        title = source.get("title", "Документ")
+                        url = source.get("url", "")
+                        ai_response += f"{i}. [{title}]({url})\n"
+                
+                used_rag = True
+                print(f"✅ RAG хариулт олдлоо: {ai_response[:100]}...")
+            else:
+                print("❌ RAG хариулт олдсонгүй - AI Assistant-д шилжүүлж байна")
+        else:
+            print("💬 Ерөнхий асуулт - AI Assistant-р хариулна")
         
-        # Хэрэв бүх оролдлого бүтэлгүйтвэл ажилтанд хуваарилах
-        if retry_count > MAX_AI_RETRIES:
-            print("❌ AI-ийн бүх оролдлого бүтэлгүйтэв - ажилтанд хуваарилж байна")
+        # ========== STANDARD AI ASSISTANT (хэрэв RAG ашиглаагүй бол) ==========
+        if not used_rag:
+            print("🤖 Standard AI Assistant ашиглаж байна...")
             
-            send_teams_notification(
-                conv_id, 
-                message_content, 
-                verified_email, 
-                f"AI {MAX_AI_RETRIES + 1} удаа дараалан алдаа гаргалаа",
-                f"Thread ID: {thread_id}, Бүх retry оролдлого бүтэлгүйтэв"
-            )
+            # Thread мэдээлэл авах
+            conv = get_conversation(conv_id)
+            conv_attrs = conv.get("custom_attributes", {})
             
-            ai_response = (
-                "🚨 Уучлаарай, техникийн асуудал гарлаа.\n\n"
-                "Би таны асуултыг техникийн багт дамжуулаа. Удахгүй асуудлыг шийдэж, танд хариулт өгөх болно.\n\n"
-                "🕐 Түр хүлээнэ үү..."
-            )
+            thread_key = f"openai_thread_{contact_id}"
+            thread_id = conv_attrs.get(thread_key)
+            
+            # Thread шинээр үүсгэх хэрэгтэй эсэхийг шалгах
+            if not thread_id:
+                print("🧵 Шинэ thread үүсгэж байна...")
+                thread = client.beta.threads.create()
+                thread_id = thread.id
+                update_conversation(conv_id, {thread_key: thread_id})
+                print(f"✅ Thread үүсгэлээ: {thread_id}")
+            else:
+                print(f"✅ Одоо байгаа thread ашиглаж байна: {thread_id}")
+
+            # AI хариулт авах (retry logic-той)
+            print("🤖 AI хариулт авч байна...")
+            
+            retry_count = 0
+            
+            while retry_count <= MAX_AI_RETRIES:
+                ai_response = get_ai_response(thread_id, message_content, conv_id, verified_email, retry_count)
+                
+                # Хэрэв алдаатай хариулт биш бол амжилттай
+                if not any(error_phrase in ai_response for error_phrase in [
+                    "алдаа гарлаа", "хэт удаж байна", "олдсонгүй"
+                ]):
+                    break
+                    
+                retry_count += 1
+                if retry_count <= MAX_AI_RETRIES:
+                    print(f"🔄 AI дахин оролдож байна... ({retry_count}/{MAX_AI_RETRIES})")
+                    time.sleep(2)  # 2 секунд хүлээх
+            
+            # Хэрэв бүх оролдлого бүтэлгүйтвэл ажилтанд хуваарилах
+            if retry_count > MAX_AI_RETRIES:
+                print("❌ AI-ийн бүх оролдлого бүтэлгүйтэв - ажилтанд хуваарилж байна")
+                
+                send_teams_notification(
+                    conv_id, 
+                    message_content, 
+                    verified_email, 
+                    f"AI {MAX_AI_RETRIES + 1} удаа дараалан алдаа гаргалаа",
+                    f"Thread ID: {thread_id}, Бүх retry оролдлого бүтэлгүйтэв"
+                )
+                
+                ai_response = (
+                    "🚨 Уучлаарай, техникийн асуудал гарлаа.\n\n"
+                    "Би таны асуултыг техникийн багт дамжуулаа. Удахгүй асуудлыг шийдэж, танд хариулт өгөх болно.\n\n"
+                    "🕐 Түр хүлээнэ үү..."
+                )
         
+        # ========== ХАРИУЛТ ИЛГЭЭХ ==========
         # Chatwoot руу илгээх
+        response_type = "RAG" if used_rag else "AI Assistant"
         send_to_chatwoot(conv_id, ai_response)
-        print(f"✅ AI хариулт илгээлээ: {ai_response[:50]}...")
+        print(f"✅ {response_type} хариулт илгээлээ: {ai_response[:50]}...")
         
-        # AI амжилттай хариулт өгсний дараа асуудлыг дүгнэж Teams-ээр мэдээлэх
-        if retry_count <= MAX_AI_RETRIES:  # Зөвхөн амжилттай AI хариулт үед
+        # ========== TEAMS МЭДЭЭЛЭЛ (зөвхөн Standard AI-д) ==========
+        # RAG ашигласан бол Teams мэдээлэх шаардлагагүй
+        if not used_rag and retry_count <= MAX_AI_RETRIES:  # Зөвхөн амжилттай AI хариулт үед
             print("🔍 Teams-д илгээх хэрэгтэй эсэхийг шалгаж байна...")
             
             # Шинэ асуудал мөн эсэхийг шалгах
@@ -648,6 +913,8 @@ def webhook():
                     print(f"❌ Асуудал дүгнэхэд алдаа: {e}")
             else:
                 print(f"⏭️ {reason} - Teams-д илгээхгүй")
+        elif used_rag:
+            print("📚 RAG ашигласан учир Teams мэдээлэх шаардлагагүй")
         
         return jsonify({"status": "success"}), 200
 
@@ -684,6 +951,122 @@ def test_teams():
             return jsonify({"error": "Teams мэдээлэл илгээхэд алдаа"}), 500
             
     except Exception as e:
+        return jsonify({"error": f"Алдаа: {str(e)}"}), 500
+
+@app.route("/docs-search", methods=["POST"])
+def docs_search():
+    """RAG системээр документ хайх тусдаа endpoint"""
+    try:
+        if not qa_chain:
+            return jsonify({"error": "RAG систем бэлэн биш байна"}), 500
+            
+        data = request.json
+        if not data:
+            return jsonify({"error": "JSON өгөгдөл байхгүй"}), 400
+            
+        question = data.get("question", "").strip()
+        if not question:
+            return jsonify({"error": "Асуулт байхгүй байна"}), 400
+            
+        logger.info(f"RAG хайлт: {question}")
+        
+        # RAG хайлт хийх
+        result = search_docs_with_rag(question)
+        
+        # Response форматлах
+        response = {
+            "question": question,
+            "answer": result["answer"],
+            "sources": result["sources"],
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        logger.info(f"RAG хариулт: {len(result['sources'])} sources олдлоо")
+        return jsonify(response), 200
+        
+    except Exception as e:
+        logger.error(f"RAG endpoint алдаа: {str(e)}")
+        return jsonify({"error": f"Системийн алдаа: {str(e)}"}), 500
+
+@app.route("/health", methods=["GET"])
+def health():
+    """Системийн health check"""
+    status = {
+        "status": "ok",
+        "timestamp": datetime.utcnow().isoformat(),
+        "components": {
+            "rag_system": qa_chain is not None,
+            "openai_client": client is not None,
+            "teams_webhook": TEAMS_WEBHOOK_URL is not None,
+            "email_smtp": SENDER_EMAIL is not None and SENDER_PASSWORD is not None,
+            "chatwoot_api": CHATWOOT_API_KEY is not None and ACCOUNT_ID is not None
+        }
+    }
+    
+    # Нийт статус шалгах
+    all_ok = all(status["components"].values())
+    if not all_ok:
+        status["status"] = "warning"
+        
+    return jsonify(status), 200 if all_ok else 206
+
+@app.route("/rebuild-docs", methods=["POST"])
+def rebuild_docs():
+    """Документын vector store дахин бүтээх"""
+    try:
+        logger.info("Документын vector store дахин бүтээж байна...")
+        
+        # Хуучин vector store устгах
+        if os.path.exists(VECTOR_STORE_PATH):
+            import shutil
+            shutil.rmtree(VECTOR_STORE_PATH)
+            logger.info("Хуучин vector store устгалаа")
+        
+        # Шинэ vector store үүсгэх
+        global qa_chain, vectorstore
+        
+        # Документ цуглуулах
+        docs = crawl_docs(DOCS_BASE_URL)
+        if not docs:
+            return jsonify({"error": "Документ олдсонгүй"}), 400
+        
+        # Vector store үүсгэх
+        chunks = chunk_documents(docs)
+        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+        vectorstore = FAISS.from_documents(chunks, embeddings)
+        vectorstore.save_local(VECTOR_STORE_PATH)
+        
+        # QA chain дахин үүсгэх
+        retriever = vectorstore.as_retriever(
+            search_type="similarity",
+            search_kwargs={"k": 3}
+        )
+        
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=LC_OpenAI(
+                openai_api_key=OPENAI_API_KEY, 
+                temperature=0.1,
+                max_tokens=500,
+                model_name="gpt-3.5-turbo-instruct"
+            ),
+            chain_type="stuff",
+            retriever=retriever,
+            chain_type_kwargs={"prompt": CUSTOM_PROMPT},
+            return_source_documents=True
+        )
+        
+        logger.info(f"Vector store амжилттай дахин бүтээлээ: {len(docs)} документ, {len(chunks)} chunk")
+        
+        return jsonify({
+            "status": "success",
+            "message": f"Документын vector store дахин бүтээлээ",
+            "documents_count": len(docs),
+            "chunks_count": len(chunks),
+            "timestamp": datetime.utcnow().isoformat()
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Vector store дахин бүтээхэд алдаа: {str(e)}")
         return jsonify({"error": f"Алдаа: {str(e)}"}), 500
 
 def escalate_to_human(conv_id, customer_message, customer_email=None):
