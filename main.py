@@ -136,41 +136,77 @@ def send_to_chatwoot(conv_id, text):
     r = requests.post(url, json=payload, headers=headers)
     r.raise_for_status()
 
-def analyze_customer_issue(message_content, customer_email=None):
-    """AI ашиглан хэрэглэгчийн асуудлыг дүгнэх"""
+def analyze_customer_issue(thread_id, current_message, customer_email=None):
+    """AI ашиглан хэрэглэгчийн бүх чат түүхийг дүгнэж, comprehensive мэдээлэл өгөх"""
     try:
-        # Асуудал дүгнэх зориулалтын prompt
-        analysis_prompt = f"""
-        Хэрэглэгчийн дараах мессежийг дүгнэж, асуудлыг тодорхой болго:
-
-        Хэрэглэгчийн мессеж: "{message_content}"
-
-        Дараах форматаар хариул:
+        # OpenAI thread-с бүх мессежийг авах
+        messages = client.beta.threads.messages.list(thread_id=thread_id, limit=50)
         
-        АСУУДЛЫН ТӨРӨЛ: [асуудлын ангилал]
-        ЯАРАЛТАЙ БАЙДАЛ: [Өндөр/Дунд/Бага]
-        АСУУДЛЫН ТОВЧ ТАЙЛБАР: [1-2 өгүүлбэрээр тодорхойлолт]
-        ШААРДЛАГАТАЙ АРГА ХЭМЖЭЭ: [ямар арга хэмжээ авах хэрэгтэй]
-        ХҮЛЭЭГДЭЖ БУЙ ХАРИУЛТ: [хэрэглэгч ямар хариулт хүлээж байгаа]
-        """
+        # Хэрэглэгчийн мессежүүдийг цуглуулах
+        conversation_history = []
+        for msg in reversed(messages.data):  # Эхнээс нь эрэмбэлэх
+            if msg.role == "user":
+                content = ""
+                for content_block in msg.content:
+                    if hasattr(content_block, 'text'):
+                        content += content_block.text.value
+                if content.strip():
+                    conversation_history.append(f"Хэрэглэгч: {content.strip()}")
+            elif msg.role == "assistant":
+                content = ""
+                for content_block in msg.content:
+                    if hasattr(content_block, 'text'):
+                        content += content_block.text.value
+                if content.strip():
+                    conversation_history.append(f"AI: {content.strip()[:200]}...")  # Хязгаарлах
+        
+        # Хэрэв чат түүх хоосон бол зөвхөн одоогийн мессежээр дүгнэх
+        if not conversation_history:
+            conversation_history = [f"Хэрэглэгч: {current_message}"]
+        
+        # Conversation түүхийг string болгох
+        chat_history = "\n".join(conversation_history[-10:])  # Сүүлийн 10 мессеж
+        
+        # Илүү тодорхой system prompt
+        system_msg = (
+            "Та бол дэмжлэгийн мэргэжилтэн. "
+            "Хэрэглэгчийн бүх чат түүхийг харж, асуудлыг иж бүрэн дүгнэж өгнө үү. "
+            "Хэрэв олон асуудал байвал гол асуудлыг тодорхойлж фокуслана уу."
+        )
 
-        # OpenAI-аар дүгнэлт хийх
+        # Comprehensive user prompt
+        user_msg = f'''
+Хэрэглэгчийн чат түүх:
+{chat_history}
+
+Одоогийн мессеж: "{current_message}"
+
+Дараах форматаар бүх чат түүхэд тулгуурлан дүгнэлт өгнө үү:
+
+АСУУДЛЫН ТӨРӨЛ: [Техникийн/Худалдааны/Мэдээллийн/Гомдол]
+ЯАРАЛТАЙ БАЙДАЛ: [Өндөр/Дунд/Бага] 
+АСУУДЛЫН ТОВЧ ТАЙЛБАР: [Гол асуудлыг 1-2 өгүүлбэрээр]
+ЧАТЫН ХЭВ МАЯГ: [Анхны асуулт/Дагалдах асуулт/Гомдол/Тодруулга хүсэх]
+ШААРДЛАГАТАЙ АРГА ХЭМЖЭЭ: [Тодорхой арга хэмжээ]
+ХҮЛЭЭГДЭЖ БУЙ ХАРИУЛТ: [Хэрэглэгч ямар хариулт хүлээж байгаа]
+ДҮГНЭЛТ: [Ерөнхий үнэлгээ ба зөвлөмж]
+'''
+
         response = client.chat.completions.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "Та хэрэглэгчийн хүсэлтийг дүгнэж, ажилтанд тодорхой мэдээлэл өгөх мэргэжилтэн."},
-                {"role": "user", "content": analysis_prompt}
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg}
             ],
             max_tokens=500,
-            temperature=0.3
+            temperature=0.2
         )
-        
-        analysis = response.choices[0].message.content.strip()
-        return analysis
-        
+
+        return response.choices[0].message.content.strip()
+
     except Exception as e:
         print(f"❌ Асуудал дүгнэхэд алдаа: {e}")
-        return f"Асуудал дүгнэх боломжгүй. Хэрэглэгчийн анхны мессеж: {message_content}"
+        return f"Асуудал дүгнэх боломжгүй. Хэрэглэгчийн одоогийн мессеж: {current_message}"
 
 def send_teams_notification(conv_id, customer_message, customer_email=None, escalation_reason="Хэрэглэгчийн асуудал", ai_analysis=None):
     """Microsoft Teams руу техникийн асуудлын талаар ажилтанд мэдээлэх"""
@@ -586,24 +622,32 @@ def webhook():
         
         # AI амжилттай хариулт өгсний дараа асуудлыг дүгнэж Teams-ээр мэдээлэх
         if retry_count <= MAX_AI_RETRIES:  # Зөвхөн амжилттай AI хариулт үед
-            print("🔍 Асуудлыг дүгнэж ажилтанд мэдээлэх...")
-            try:
-                # AI-ээр асуудлыг дүгнэх
-                analysis = analyze_customer_issue(message_content, verified_email)
-                print(f"✅ Дүгнэлт бэлэн: {analysis[:100]}...")
-                
-                # Teams-ээр мэдээлэх
-                send_teams_notification(
-                    conv_id,
-                    message_content,
-                    verified_email,
-                    "Хэрэглэгчийн асуудлын дүгнэлт",
-                    analysis
-                )
-                print("✅ Асуудлын дүгнэлт ажилтанд илгээлээ")
-                
-            except Exception as e:
-                print(f"❌ Асуудал дүгнэхэд алдаа: {e}")
+            print("🔍 Teams-д илгээх хэрэгтэй эсэхийг шалгаж байна...")
+            
+            # Шинэ асуудал мөн эсэхийг шалгах
+            should_escalate, reason = should_escalate_to_teams(thread_id, message_content)
+            
+            if should_escalate:
+                print(f"✅ {reason} - Teams-д илгээх")
+                try:
+                    # AI-ээр асуудлыг дүгнэх
+                    analysis = analyze_customer_issue(thread_id, message_content, verified_email)
+                    print(f"✅ Дүгнэлт бэлэн: {analysis[:100]}...")
+                    
+                    # Teams-ээр мэдээлэх
+                    send_teams_notification(
+                        conv_id,
+                        message_content,
+                        verified_email,
+                        f"Хэрэглэгчийн асуудлын дүгнэлт - {reason}",
+                        analysis
+                    )
+                    print("✅ Асуудлын дүгнэлт ажилтанд илгээлээ")
+                    
+                except Exception as e:
+                    print(f"❌ Асуудал дүгнэхэд алдаа: {e}")
+            else:
+                print(f"⏭️ {reason} - Teams-д илгээхгүй")
         
         return jsonify({"status": "success"}), 200
 
@@ -643,13 +687,18 @@ def test_teams():
         return jsonify({"error": f"Алдаа: {str(e)}"}), 500
 
 def escalate_to_human(conv_id, customer_message, customer_email=None):
-    """Хэрэглэгчийн асуудлыг AI-ээр дүгнэж Teams-ээр ажилтанд хуваарилах"""
+    """Хэрэглэгчийн асуудлыг AI-ээр дүгнэж Teams-ээр ажилтанд хуваарилах (ашиглагддаггүй)"""
     try:
         print("🔍 Хэрэглэгчийн асуудлыг дүгнэж байна...")
         
-        # AI ашиглан асуудлыг дүгнэх
-        analysis = analyze_customer_issue(customer_message, customer_email)
-        print(f"✅ Дүгнэлт бэлэн: {analysis[:100]}...")
+        # Энэ функц ашиглагддаггүй учир простой дүгнэлт хийх
+        simple_analysis = f"""АСУУДЛЫН ТӨРӨЛ: Тодорхойгүй
+ЯАРАЛТАЙ БАЙДАЛ: Дунд
+АСУУДЛЫН ТОВЧ ТАЙЛБАР: {customer_message}
+ШААРДЛАГАТАЙ АРГА ХЭМЖЭЭ: Ажилтны анхаарал шаардлагатай
+ХҮЛЭЭГДЭЖ БУЙ ХАРИУЛТ: Хэрэглэгчийн асуудлыг шийдэх"""
+        
+        print(f"✅ Энгийн дүгнэлт бэлэн: {simple_analysis[:100]}...")
         
         # Teams-ээр мэдээлэх
         success = send_teams_notification(
@@ -657,7 +706,7 @@ def escalate_to_human(conv_id, customer_message, customer_email=None):
             customer_message,
             customer_email,
             "Хэрэглэгчийн асуудлын дүгнэлт",
-            analysis
+            simple_analysis
         )
         
         if success:
@@ -670,6 +719,67 @@ def escalate_to_human(conv_id, customer_message, customer_email=None):
     except Exception as e:
         print(f"❌ Escalation алдаа: {e}")
         return "Уучлаарай, алдаа гарлаа. Дахин оролдоно уу."
+
+def should_escalate_to_teams(thread_id, current_message):
+    """Тухайн асуудлыг Teams-д илгээх хэрэгтэй эсэхийг шийдэх"""
+    try:
+        # OpenAI thread-с сүүлийн 20 мессежийг авах
+        messages = client.beta.threads.messages.list(thread_id=thread_id, limit=20)
+        
+        # Хэрэглэгчийн мессежүүдийг цуглуулах
+        user_messages = []
+        for msg in reversed(messages.data):
+            if msg.role == "user":
+                content = ""
+                for content_block in msg.content:
+                    if hasattr(content_block, 'text'):
+                        content += content_block.text.value
+                if content.strip():
+                    user_messages.append(content.strip())
+        
+        # Хэрэв анхны мессеж бол Teams-д илгээх
+        if len(user_messages) <= 1:
+            return True, "Анхны асуулт"
+        
+        # AI-аар шинэ асуудал мөн эсэхийг шалгах
+        system_msg = (
+            "Та бол чат дүн шинжилгээний мэргэжилтэн. "
+            "Хэрэглэгчийн сүүлийн мессеж нь шинэ асуудал мөн эсэхийг тодорхойлно уу."
+        )
+        
+        user_msg = f'''
+Хэрэглэгчийн өмнөх мессежүүд:
+{chr(10).join(user_messages[:-1])}
+
+Одоогийн мессеж: "{current_message}"
+
+Дараах аль нэгээр хариулна уу:
+- "ШИН_АСУУДАЛ" - хэрэв одоогийн мессеж шинэ төрлийн асуудал бол
+- "ҮРГЭЛЖЛЭЛ" - хэрэв өмнөх асуудлын үргэлжлэл, тодруулга бол
+- "ДАХИН_АСУУЛТ" - хэрэв ижил асуудлыг дахин асууж байгаа бол
+'''
+        
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg}
+            ],
+            max_tokens=50,
+            temperature=0.1
+        )
+        
+        analysis_result = response.choices[0].message.content.strip()
+        
+        if "ШИН_АСУУДАЛ" in analysis_result:
+            return True, "Шинэ асуудал илрэв"
+        else:
+            return False, "Өмнөх асуудлын үргэлжлэл"
+            
+    except Exception as e:
+        print(f"❌ Escalation шийдэх алдаа: {e}")
+        # Алдаа гарвал анхны мессеж гэж үзэх
+        return True, "Алдаа - анхны мессеж гэж үзэв"
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
