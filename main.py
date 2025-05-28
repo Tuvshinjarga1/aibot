@@ -228,35 +228,35 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
                             ]
                         }
                     ]
-                    
-                    # AI дүгнэлт нэмэх
-                    if ai_analysis:
-                        teams_message["attachments"][0]["content"]["body"].append({
-                            "type": "TextBlock",
-                            "text": "🤖 AI Дүгнэлт:",
-                            "weight": "Bolder",
-                            "size": "Medium",
-                            "spacing": "Large"
-                        })
-                        teams_message["attachments"][0]["content"]["body"].append({
-                            "type": "TextBlock",
-                            "text": ai_analysis,
-                            "wrap": True,
-                            "fontType": "Monospace",
-                            "color": "Good"
-                        })
-                    
-                    # Actions нэмэх
-                    teams_message["attachments"][0]["content"]["actions"] = [
-                        {
-                            "type": "Action.OpenUrl",
-                            "title": "Chatwoot дээр харах",
-                            "url": conv_url
-                        }
-                    ]
                 }
             }]
         }
+        
+        # AI дүгнэлт нэмэх
+        if ai_analysis:
+            teams_message["attachments"][0]["content"]["body"].append({
+                "type": "TextBlock",
+                "text": "🤖 AI Дүгнэлт:",
+                "weight": "Bolder",
+                "size": "Medium",
+                "spacing": "Large"
+            })
+            teams_message["attachments"][0]["content"]["body"].append({
+                "type": "TextBlock",
+                "text": ai_analysis,
+                "wrap": True,
+                "fontType": "Monospace",
+                "color": "Good"
+            })
+        
+        # Actions нэмэх
+        teams_message["attachments"][0]["content"]["actions"] = [
+            {
+                "type": "Action.OpenUrl",
+                "title": "Chatwoot дээр харах",
+                "url": conv_url
+            }
+        ]
         
         response = requests.post(TEAMS_WEBHOOK_URL, json=teams_message)
         response.raise_for_status()
