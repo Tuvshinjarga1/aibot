@@ -372,5 +372,30 @@ def webhook():
         print(f"💥 Webhook алдаа: {e}")
         return jsonify({"status": f"error: {str(e)}"}), 500
 
+@app.route("/bot/teams", methods=["POST"])
+def teams_bot_handler():
+    data = request.json
+    print(f"📩 Teams message received: {data}")
+
+    # Teams-с ирсэн мессежээс текст авах
+    user_text = data.get("text", "").strip()
+    if not user_text:
+        return jsonify({"type": "message", "text": "⚠️ Мессеж хоосон байна."}), 200
+
+    # ⚠️ Та энд conv_id-г өөрийн системтэй уях логик оруулж болно
+    conv_id = os.environ.get("DEFAULT_CONV_ID")  # эсвэл API-р харгалзах conv_id олж болно
+
+    if not conv_id:
+        return jsonify({"type": "message", "text": "❌ Conv ID тохируулаагүй байна."}), 200
+
+    # Chatwoot руу agent хариу илгээх
+    try:
+        send_to_chatwoot(conv_id, f"💬 Teams Agent: {user_text}")
+        return jsonify({"type": "message", "text": "✅ Chatwoot руу илгээлээ!"}), 200
+    except Exception as e:
+        print(f"❌ Chatwoot-д илгээхэд алдаа: {e}")
+        return jsonify({"type": "message", "text": "❌ Chatwoot руу илгээж чадсангүй."}), 200
+
+
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
