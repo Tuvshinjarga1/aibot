@@ -27,7 +27,6 @@ SENDER_PASSWORD = os.environ["SENDER_PASSWORD"]
 
 # Microsoft Teams тохиргоо
 TEAMS_WEBHOOK_URL = os.environ.get("TEAMS_WEBHOOK_URL")
-ESCALATE_TO_HUMAN_KEYWORDS = ["ажилтан", "хүн", "дуудаад өг", "холбоод өг", "тусламж", "туслаач", "ярилцмаар", "manager", "supervisor"]
 MAX_AI_RETRIES = 2  # AI хэдэн удаа оролдсоны дараа ажилтанд хуваарилах
 
 # JWT тохиргоо
@@ -137,8 +136,44 @@ def send_to_chatwoot(conv_id, text):
     r = requests.post(url, json=payload, headers=headers)
     r.raise_for_status()
 
-def send_teams_notification(conv_id, customer_message, customer_email=None, escalation_reason="AI хариулт олдсонгүй"):
-    """Microsoft Teams руу ажилтанд мэдээлэх"""
+def analyze_customer_issue(message_content, customer_email=None):
+    """AI ашиглан хэрэглэгчийн асуудлыг дүгнэх"""
+    try:
+        # Асуудал дүгнэх зориулалтын prompt
+        analysis_prompt = f"""
+        Хэрэглэгчийн дараах мессежийг дүгнэж, асуудлыг тодорхой болго:
+
+        Хэрэглэгчийн мессеж: "{message_content}"
+
+        Дараах форматаар хариул:
+        
+        АСУУДЛЫН ТӨРӨЛ: [асуудлын ангилал]
+        ЯАРАЛТАЙ БАЙДАЛ: [Өндөр/Дунд/Бага]
+        АСУУДЛЫН ТОВЧ ТАЙЛБАР: [1-2 өгүүлбэрээр тодорхойлолт]
+        ШААРДЛАГАТАЙ АРГА ХЭМЖЭЭ: [ямар арга хэмжээ авах хэрэгтэй]
+        ХҮЛЭЭГДЭЖ БУЙ ХАРИУЛТ: [хэрэглэгч ямар хариулт хүлээж байгаа]
+        """
+
+        # OpenAI-аар дүгнэлт хийх
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "Та хэрэглэгчийн хүсэлтийг дүгнэж, ажилтанд тодорхой мэдээлэл өгөх мэргэжилтэн."},
+                {"role": "user", "content": analysis_prompt}
+            ],
+            max_tokens=500,
+            temperature=0.3
+        )
+        
+        analysis = response.choices[0].message.content.strip()
+        return analysis
+        
+    except Exception as e:
+        print(f"❌ Асуудал дүгнэхэд алдаа: {e}")
+        return f"Асуудал дүгнэх боломжгүй. Хэрэглэгчийн анхны мессеж: {message_content}"
+
+def send_teams_notification(conv_id, customer_message, customer_email=None, escalation_reason="Хэрэглэгчийн асуудал", ai_analysis=None):
+    """Microsoft Teams руу техникийн асуудлын талаар ажилтанд мэдээлэх"""
     if not TEAMS_WEBHOOK_URL:
         print("⚠️ Teams webhook URL тохируулаагүй байна")
         return False
@@ -146,6 +181,11 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
     try:
         # Chatwoot conversation URL
         conv_url = f"{CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conv_id}"
+        
+        # AI асуудлын дэлгэрэнгүй мэдээлэл бэлтгэх
+        error_summary = escalation_reason
+        if ai_analysis:
+            error_summary += f"\n\nДэлгэрэнгүй анализ: {ai_analysis}"
         
         # Teams message format
         teams_message = {
@@ -159,25 +199,27 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
                     "body": [
                         {
                             "type": "TextBlock",
-                            "text": "🚨 Хэрэглэгч ажилтантай холбогдохыг хүсч байна",
+                            "text": "📋 Хэрэглэгчийн асуудлын дүгнэлт",
                             "weight": "Bolder",
                             "size": "Medium",
                             "color": "Attention"
                         },
                         {
+                            "type": "TextBlock",
+                            "text": "AI систем хэрэглэгчийн асуудлыг дүгнэж, ажилтны анхаарал татахуйц асуудал гэж үзэж байна.",
+                            "wrap": True,
+                            "color": "Default"
+                        },
+                        {
                             "type": "FactSet",
                             "facts": [
-                                {
-                                    "title": "Шалтгаан:",
-                                    "value": escalation_reason
-                                },
                                 {
                                     "title": "Харилцагч:",
                                     "value": customer_email or "Тодорхойгүй"
                                 },
                                 {
-                                    "title": "Мессеж:",
-                                    "value": customer_message[:200] + ("..." if len(customer_message) > 200 else "")
+                                    "title": "Хэрэглэгчийн мессеж:",
+                                    "value": customer_message[:300] + ("..." if len(customer_message) > 300 else "")
                                 },
                                 {
                                     "title": "Хугацаа:",
@@ -185,8 +227,27 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
                                 }
                             ]
                         }
-                    ],
-                    "actions": [
+                    ]
+                    
+                    # AI дүгнэлт нэмэх
+                    if ai_analysis:
+                        teams_message["attachments"][0]["content"]["body"].append({
+                            "type": "TextBlock",
+                            "text": "🤖 AI Дүгнэлт:",
+                            "weight": "Bolder",
+                            "size": "Medium",
+                            "spacing": "Large"
+                        })
+                        teams_message["attachments"][0]["content"]["body"].append({
+                            "type": "TextBlock",
+                            "text": ai_analysis,
+                            "wrap": True,
+                            "fontType": "Monospace",
+                            "color": "Good"
+                        })
+                    
+                    # Actions нэмэх
+                    teams_message["attachments"][0]["content"]["actions"] = [
                         {
                             "type": "Action.OpenUrl",
                             "title": "Chatwoot дээр харах",
@@ -199,20 +260,12 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
         
         response = requests.post(TEAMS_WEBHOOK_URL, json=teams_message)
         response.raise_for_status()
-        print(f"✅ Teams мэдээлэл илгээлээ: {escalation_reason}")
+        print(f"✅ Teams техникийн мэдээлэл илгээлээ: {escalation_reason}")
         return True
         
     except Exception as e:
         print(f"❌ Teams мэдээлэл илгээхэд алдаа: {e}")
         return False
-
-def check_escalation_keywords(message):
-    """Хэрэглэгчийн мессежээс ажилтан дуудах keyword-үүд байгаа эсэхийг шалгах"""
-    message_lower = message.lower()
-    for keyword in ESCALATE_TO_HUMAN_KEYWORDS:
-        if keyword in message_lower:
-            return True, keyword
-    return False, None
 
 def get_ai_response(thread_id, message_content, conv_id=None, customer_email=None, retry_count=0):
     """OpenAI Assistant-ээс хариулт авах"""
@@ -250,7 +303,8 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
                         conv_id, 
                         message_content, 
                         customer_email, 
-                        f"AI run алдаа: {run_status.status}"
+                        f"AI run статус алдаа: {run_status.status}",
+                        f"OpenAI run ID: {run.id}, Status: {run_status.status}"
                     )
                 
                 return error_msg
@@ -267,7 +321,8 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
                     conv_id, 
                     message_content, 
                     customer_email, 
-                    "AI хариулт timeout"
+                    "AI хариулт timeout (30 секунд)",
+                    f"OpenAI run ID: {run.id}, Thread ID: {thread_id}"
                 )
             
             return timeout_msg
@@ -292,7 +347,8 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
                 conv_id, 
                 message_content, 
                 customer_email, 
-                "AI хариулт олдсонгүй"
+                "AI хариулт олдсонгүй",
+                f"Thread ID: {thread_id}, Messages хайлтад хариулт байхгүй"
             )
         
         return no_response_msg
@@ -307,7 +363,8 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
                 conv_id, 
                 message_content, 
                 customer_email, 
-                f"AI системийн алдаа: {str(e)}"
+                "AI системийн алдаа (Exception)",
+                f"Python exception: {str(e)}, Thread ID: {thread_id}"
             )
         
         return error_msg
@@ -468,26 +525,6 @@ def webhook():
         # ========== AI CHATBOT АЖИЛЛУУЛАХ ==========
         print(f"🤖 Баталгаажсан хэрэглэгч ({verified_email}) - AI chatbot ажиллуулж байна")
         
-        # Эхлээд keyword шалгах (хэрэглэгч ажилтан дуудаж байгаа эсэх)
-        needs_human, found_keyword = check_escalation_keywords(message_content)
-        if needs_human:
-            print(f"🚨 Ажилтан дуудах keyword олдлоо: '{found_keyword}'")
-            
-            # Teams-ээр мэдээлэх
-            send_teams_notification(
-                conv_id, 
-                message_content, 
-                verified_email, 
-                f"Хэрэглэгч ажилтан хүслээ ('{found_keyword}')"
-            )
-            
-            # Хэрэглэгчид мэдээлэх
-            send_to_chatwoot(conv_id, 
-                "👋 Би таны хүсэлтийг ажилтанд дамжуулаа. Удахгүй ажилтан тантай холбогдоно.\n\n"
-                "🕐 Түр хүлээнэ үү...")
-            
-            return jsonify({"status": "escalated_to_human"}), 200
-        
         # Thread мэдээлэл авах
         conv = get_conversation(conv_id)
         conv_attrs = conv.get("custom_attributes", {})
@@ -503,7 +540,7 @@ def webhook():
             update_conversation(conv_id, {thread_key: thread_id})
             print(f"✅ Thread үүсгэлээ: {thread_id}")
         else:
-            print(f"🧵 Одоо байгаа thread ашиглаж байна: {thread_id}")
+            print(f"✅ Одоо байгаа thread ашиглаж байна: {thread_id}")
 
         # AI хариулт авах (retry logic-той)
         print("🤖 AI хариулт авч байна...")
@@ -533,18 +570,40 @@ def webhook():
                 conv_id, 
                 message_content, 
                 verified_email, 
-                f"AI {MAX_AI_RETRIES + 1} удаа алдаа гаргалаа"
+                f"AI {MAX_AI_RETRIES + 1} удаа дараалан алдаа гаргалаа",
+                f"Thread ID: {thread_id}, Бүх retry оролдлого бүтэлгүйтэв"
             )
             
             ai_response = (
                 "🚨 Уучлаарай, техникийн асуудал гарлаа.\n\n"
-                "Би таны асуултыг ажилтанд дамжуулаа. Удахгүй ажилтан тантай холбогдоно.\n\n"
+                "Би таны асуултыг техникийн багт дамжуулаа. Удахгүй асуудлыг шийдэж, танд хариулт өгөх болно.\n\n"
                 "🕐 Түр хүлээнэ үү..."
             )
         
         # Chatwoot руу илгээх
         send_to_chatwoot(conv_id, ai_response)
         print(f"✅ AI хариулт илгээлээ: {ai_response[:50]}...")
+        
+        # AI амжилттай хариулт өгсний дараа асуудлыг дүгнэж Teams-ээр мэдээлэх
+        if retry_count <= MAX_AI_RETRIES:  # Зөвхөн амжилттай AI хариулт үед
+            print("🔍 Асуудлыг дүгнэж ажилтанд мэдээлэх...")
+            try:
+                # AI-ээр асуудлыг дүгнэх
+                analysis = analyze_customer_issue(message_content, verified_email)
+                print(f"✅ Дүгнэлт бэлэн: {analysis[:100]}...")
+                
+                # Teams-ээр мэдээлэх
+                send_teams_notification(
+                    conv_id,
+                    message_content,
+                    verified_email,
+                    "Хэрэглэгчийн асуудлын дүгнэлт",
+                    analysis
+                )
+                print("✅ Асуудлын дүгнэлт ажилтанд илгээлээ")
+                
+            except Exception as e:
+                print(f"❌ Асуудал дүгнэхэд алдаа: {e}")
         
         return jsonify({"status": "success"}), 200
 
@@ -559,12 +618,20 @@ def test_teams():
         return jsonify({"error": "TEAMS_WEBHOOK_URL тохируулаагүй байна"}), 400
     
     try:
+        # Тест дүгнэлт үүсгэх
+        test_analysis = """АСУУДЛЫН ТӨРӨЛ: Teams интеграцийн тест
+ЯАРАЛТАЙ БАЙДАЛ: Бага
+АСУУДЛЫН ТОВЧ ТАЙЛБАР: Систем зөвөөр ажиллаж байгаа эсэхийг шалгах зорилготой тест мэдээлэл.
+ШААРДЛАГАТАЙ АРГА ХЭМЖЭЭ: Teams мэдээллийг ажилтан харж, системтэй танилцах
+ХҮЛЭЭГДЭЖ БУЙ ХАРИУЛТ: "Тест амжилттай" гэсэн баталгаажуулалт"""
+        
         # Тест мэдээлэл илгээх
         success = send_teams_notification(
             conv_id="test_123",
             customer_message="Энэ тест мэдээлэл юм. Teams холболт ажиллаж байгаа эсэхийг шалгаж байна.",
             customer_email="test@example.com",
-            escalation_reason="Teams webhook тест"
+            escalation_reason="Teams webhook тест",
+            ai_analysis=test_analysis
         )
         
         if success:
@@ -574,6 +641,35 @@ def test_teams():
             
     except Exception as e:
         return jsonify({"error": f"Алдаа: {str(e)}"}), 500
+
+def escalate_to_human(conv_id, customer_message, customer_email=None):
+    """Хэрэглэгчийн асуудлыг AI-ээр дүгнэж Teams-ээр ажилтанд хуваарилах"""
+    try:
+        print("🔍 Хэрэглэгчийн асуудлыг дүгнэж байна...")
+        
+        # AI ашиглан асуудлыг дүгнэх
+        analysis = analyze_customer_issue(customer_message, customer_email)
+        print(f"✅ Дүгнэлт бэлэн: {analysis[:100]}...")
+        
+        # Teams-ээр мэдээлэх
+        success = send_teams_notification(
+            conv_id,
+            customer_message,
+            customer_email,
+            "Хэрэглэгчийн асуудлын дүгнэлт",
+            analysis
+        )
+        
+        if success:
+            print("✅ Асуудлыг амжилттай ажилтанд хуваарилав")
+            return "👋 Би таны асуудлыг дүгнэж, ажилтанд дамжуулаа. Удахгүй ажилтан тантай холбогдоно.\n\n🕐 Түр хүлээнэ үү..."
+        else:
+            print("❌ Teams мэдээлэл илгээхэд алдаа")
+            return "Уучлаарай, таны асуудлыг ажилтанд дамжуулахад алдаа гарлаа. Дахин оролдоно уу."
+            
+    except Exception as e:
+        print(f"❌ Escalation алдаа: {e}")
+        return "Уучлаарай, алдаа гарлаа. Дахин оролдоно уу."
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
