@@ -4,6 +4,7 @@ import requests
 import re
 import jwt
 import smtplib
+import threading
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
@@ -224,93 +225,6 @@ def search_docs_with_rag(question: str) -> dict:
             "sources": []
         }
 
-def is_new_question_or_followup(thread_id, current_message):
-    """Одоогийн мессеж шинэ асуулт мөн эсвэл өмнөх асуудлын үргэлжлэл мөн эсэхийг тодорхойлох"""
-    try:
-        if not thread_id:
-            return "new", "Thread байхгүй - шинэ асуулт"
-        
-        # OpenAI thread-с сүүлийн 10 мессежийг авах
-        messages = client.beta.threads.messages.list(thread_id=thread_id, limit=10)
-        
-        # Хэрэглэгчийн мессежүүдийг цуглуулах
-        user_messages = []
-        for msg in reversed(messages.data):
-            if msg.role == "user":
-                content = ""
-                for content_block in msg.content:
-                    if hasattr(content_block, 'text'):
-                        content += content_block.text.value
-                if content.strip():
-                    user_messages.append(content.strip())
-        
-        # Хэрэв анхны мессеж бол шинэ асуулт
-        if len(user_messages) <= 1:
-            return "new", "Анхны мессеж"
-        
-        # Ижил асуултыг дахин асууж байгаа эсэхийг шалгах
-        current_lower = current_message.lower().strip()
-        repeated_count = 0
-        
-        for prev_msg in user_messages[:-1]:  # Одоогийн мессежээс бусад
-            prev_lower = prev_msg.lower().strip()
-            
-            # Ижил эсвэл маш ижил төстэй асуулт эсэхийг шалгах
-            if (current_lower == prev_lower or 
-                (len(current_lower) > 10 and len(prev_lower) > 10 and 
-                 (current_lower in prev_lower or prev_lower in current_lower))):
-                repeated_count += 1
-        
-        # Хэрэв 2-оос дээш удаа ижил асуулт асуувал шууд Teams руу илгээх
-        if repeated_count >= 2:
-            return "new", f"Ижил асуултыг {repeated_count + 1} удаа асуулаа - дэмжлэгийн багт хуваарилах"
-        
-        # AI-аар шинэ асуулт мөн эсэхийг шалгах
-        system_msg = (
-            "Та бол чат дүн шинжилгээний мэргэжилтэн. "
-            "Хэрэглэгчийн сүүлийн мессеж нь шинэ асуулт мөн эсвэл өмнөх асуудлын үргэлжлэл мөн эсэхийг тодорхойлно уу. "
-            "Хэрэв хэрэглэгч ижил эсвэл ижил төстэй асуудлыг дахин асууж байвал энэ нь ШИНЭ асуулт гэж үзнэ үү."
-        )
-        
-        user_msg = f'''
-Хэрэглэгчийн өмнөх мессежүүд:
-{chr(10).join(user_messages[:-1])}
-
-Одоогийн мессеж: "{current_message}"
-
-Дараах аль нэгээр хариулна уу:
-- "NEW" - хэрэв одоогийн мессеж шинэ төрлийн асуудал эсвэл ижил асуудлыг дахин асууж байгаа бол
-- "FOLLOWUP" - хэрэв өмнөх асуудлын үргэлжлэл, тодруулга, нэмэлт мэдээлэл өгч байгаа бол
-
-Анхаарах зүйл: Хэрэв хэрэглэгч ижил асуудлыг дахин асууж байвал энэ нь "NEW" байна.
-'''
-        
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg}
-            ],
-            max_tokens=50,
-            temperature=0.1,
-            timeout=10
-        )
-        
-        analysis_result = response.choices[0].message.content.strip().upper()
-        
-        if "NEW" in analysis_result:
-            return "new", "AI: Шинэ асуулт илрэв"
-        elif "FOLLOWUP" in analysis_result:
-            return "followup", "AI: Өмнөх асуудлын үргэлжлэл"
-        else:
-            # Default: шинэ асуулт гэж үзэх
-            return "new", f"AI тодорхойгүй хариулт: {analysis_result}"
-            
-    except Exception as e:
-        print(f"❌ Асуултын төрөл тодорхойлох алдаа: {e}")
-        # Алдаа гарвал шинэ асуулт гэж үзэх
-        return "new", f"Алдаа гарсан: {str(e)}"
-
 # Initialize RAG system
 try:
     vectorstore = load_vectorstore()
@@ -447,7 +361,7 @@ def analyze_customer_issue(thread_id, current_message, customer_email=None):
         
         # Хэрэглэгчийн мессежүүдийг цуглуулах
         conversation_history = []
-        for msg in reversed(messages.data):
+        for msg in reversed(messages.data):  # Эхнээс нь эрэмбэлэх
             if msg.role == "user":
                 content = ""
                 for content_block in msg.content:
@@ -861,161 +775,157 @@ def webhook():
             
             return jsonify({"status": "waiting_verification"}), 200
 
-        # ========== AI CHATBOT АЖИЛЛУУЛАХ ==========
-        print(f"🤖 Баталгаажсан хэрэглэгч ({verified_email}) - AI chatbot ажиллуулж байна")
+        # ========== RAG болон AI ASSISTANT ЗЭРЭГ АЖИЛЛУУЛАХ ==========
+        print("🚀 RAG болон AI Assistant-г зэрэг ажиллуулж байна...")
         
-        # Thread мэдээлэл авах (асуултын төрөл тодорхойлохын тулд)
+        # Thread мэдээлэл бэлтгэх
         conv = get_conversation(conv_id)
         conv_attrs = conv.get("custom_attributes", {})
         thread_key = f"openai_thread_{contact_id}"
         thread_id = conv_attrs.get(thread_key)
         
-        # ========== АСУУЛТЫН ТӨРӨЛ ТОДОРХОЙЛОХ ==========
-        print("🔍 Асуултын төрөл тодорхойлж байна...")
-        question_type, reason = is_new_question_or_followup(thread_id, message_content)
-        print(f"📋 Асуултын төрөл: {question_type} - {reason}")
+        # Thread шинээр үүсгэх хэрэгтэй эсэхийг шалгах
+        if not thread_id:
+            print("🧵 Шинэ thread үүсгэж байна...")
+            thread = client.beta.threads.create()
+            thread_id = thread.id
+            update_conversation(conv_id, {thread_key: thread_id})
+            print(f"✅ Thread үүсгэлээ: {thread_id}")
+        else:
+            print(f"✅ Одоо байгаа thread ашиглаж байна: {thread_id}")
         
-        ai_response = None
-        used_rag = False
-        escalate_to_support = False
+        # Хариултуудыг хадгалах хувьсагчид
+        rag_response = {"answer": None, "sources": [], "success": False}
+        ai_response_text = None
+        ai_success = False
         
-        if question_type == "new":
-            # ========== ШИНЭ АСУУЛТ - RAG СИСТЕМЭЭР ХАЙХ ==========
-            print("🆕 Шинэ асуулт - RAG системээр хайж байна...")
-            
-            # Ижил асуултыг дахин асууж байгаа эсэхийг шалгах (reason-аас)
-            is_repeated_question = "ижил асуултыг" in reason.lower()
-            
-            # RAG-аар хариулт хайх
-            rag_result = search_docs_with_rag(message_content)
-            
-            # Хэрэв ижил асуулт дахин асууж байгаа эсэхийг шалгах
-            if is_repeated_question:
-                print(f"🔄 Ижил асуулт дахин асуулаа - Teams руу илгээж байна: {reason}")
-                escalate_to_support = True
-            # RAG хариултыг шалгах
-            elif (rag_result["answer"] and 
-                "алдаа гарлаа" not in rag_result["answer"].lower() and 
-                "документ хайлтанд алдаа" not in rag_result["answer"].lower() and
-                len(rag_result["answer"].strip()) > 20):
-                
-                # RAG хариултыг форматлах
-                ai_response = rag_result["answer"]
-                
-                # Source links нэмэх
-                if rag_result["sources"]:
-                    ai_response += "\n\n📚 **Холбогдох документууд:**\n"
-                    for i, source in enumerate(rag_result["sources"], 1):
-                        title = source.get("title", "Документ")
-                        url = source.get("url", "")
-                        ai_response += f"{i}. [{title}]({url})\n"
-                
-                used_rag = True
-                print(f"✅ RAG хариулт олдлоо: {ai_response[:100]}...")
-            else:
-                print("❌ RAG-аас хариулт олдсонгүй - дэмжлэгийн багт хуваарилж байна")
-                escalate_to_support = True
-        
-        elif question_type == "followup":
-            # ========== ҮРГЭЛЖЛЭЛ АСУУЛТ - ДЭМЖЛЭГИЙН БАГТ ХУВААРИЛАХ ==========
-            print("🔄 Өмнөх асуудлын үргэлжлэл - дэмжлэгийн багт хуваарилж байна...")
-            escalate_to_support = True
-        
-        # ========== ДЭМЖЛЭГИЙН БАГТ ХУВААРИЛАХ ==========
-        if escalate_to_support:
-            print("👥 Дэмжлэгийн багт хуваарилж байна...")
-            
-            # Teams мэдээлэх
+        # RAG функц
+        def run_rag():
+            nonlocal rag_response
             try:
-                # Thread байгаа бол асуудлыг дүгнэх
-                analysis = None
-                if thread_id:
-                    analysis = analyze_customer_issue(thread_id, message_content, verified_email)
-                    print(f"✅ Дүгнэлт бэлэн: {analysis[:100]}...")
-                
-                escalation_reason = "Шинэ асуулт - RAG-аас хариулт олдсонгүй" if question_type == "new" else "Өмнөх асуудлын үргэлжлэл"
-                
-                # Ижил асуулт дахин асуусан тохиолдолд reason-г өөрчлөх
-                if question_type == "new" and "ижил асуултыг" in reason.lower():
-                    escalation_reason = f"Ижил асуулт дахин асуулаа - {reason}"
-                
-                send_teams_notification(
-                    conv_id,
-                    message_content,
-                    verified_email,
-                    escalation_reason,
-                    analysis
-                )
-                print("✅ Дэмжлэгийн багт мэдээлэл илгээлээ")
-                
-            except Exception as e:
-                print(f"❌ Teams мэдээлэл илгээхэд алдаа: {e}")
-            
-            # Хэрэглэгчид мэдээлэх
-            if question_type == "new":
-                # Хэрэв ижил асуулт дахин асууж байвал шууд Teams руу илгээх
-                if "ижил асуултыг" in reason.lower():
-                    ai_response = (
-                        "🔄 Та энэ асуултыг хэд хэдэн удаа асуулаа.\n\n"
-                        "👥 Би таны асуултыг дэмжлэгийн багт дамжуулаа. "
-                        "Мэргэжилтэн удахгүй танд хариулт өгөх болно.\n\n"
-                        "🕐 Түр хүлээнэ үү..."
-                    )
+                print("📚 RAG системээр хайж байна...")
+                result = search_docs_with_rag(message_content)
+                if result["answer"] and "алдаа гарлаа" not in result["answer"]:
+                    rag_response = {
+                        "answer": result["answer"],
+                        "sources": result["sources"],
+                        "success": True
+                    }
+                    print(f"✅ RAG амжилттай: {result['answer'][:50]}...")
                 else:
-                    # Анх удаа RAG-аас хариулт олдохгүй үед тодруулга шаардах
-                    conv_attrs = get_conversation(conv_id).get("custom_attributes", {})
-                    clarification_requested = conv_attrs.get("clarification_requested", "")
-                    
-                    if clarification_requested != "true":
-                        # Анх удаа тодруулга шаардах
-                        ai_response = (
-                            "🔍 Таны асуултын хариултыг документаас олж чадсангүй.\n\n"
-                            "📝 Дэмжлэгийн багт хуваарилахаас өмнө асуултаа илүү тодорхой бичиж өгнө үү:\n\n"
-                            "• Ямар асуудалтай тулгарч байна вэ?\n"
-                            "• Хэзээнээс эхэлсэн бэ?\n"
-                            "• Ямар алдааны мессеж гарч байна вэ?\n"
-                            "• Юу хийхийг оролдож байгаа вэ?\n\n"
-                            "💡 Дэлгэрэнгүй мэдээлэл өгвөл илүү хурдан тусламж авах боломжтой!"
-                        )
-                        
-                        # Тодруулга шаардсан гэж тэмдэглэх
-                        update_conversation(conv_id, {"clarification_requested": "true"})
-                        escalate_to_support = False  # Одоохондоо Teams руу илгээхгүй
-                        print("📝 Хэрэглэгчээс тодруулга шаардлаа")
-                    else:
-                        # Хоёр дахь удаа - Teams руу илгээх
-                        ai_response = (
-                            "🔍 Таны нэмэлт мэдээллийг авлаа.\n\n"
-                            "👥 Би таны асуултыг дэмжлэгийн багт дамжуулаа. "
-                            "Мэргэжилтэн удахгүй танд хариулт өгөх болно.\n\n"
-                            "🕐 Түр хүлээнэ үү..."
-                        )
-                        
-                        # Тодруулга шаардсан flag-г цэвэрлэх
-                        update_conversation(conv_id, {"clarification_requested": "false"})
-                        print("✅ Тодруулга авсан - Teams руу илгээж байна")
-            else:
-                ai_response = (
-                    "🔄 Таны өмнөх асуудлын үргэлжлэл гэж ойлголоо.\n\n"
-                    "👥 Би таны мессежийг дэмжлэгийн багт дамжуулаа. "
-                    "Мэргэжилтэн удахгүй танд хариулт өгөх болно.\n\n"
-                    "🕐 Түр хүлээнэ үү..."
-                )
+                    print("❌ RAG хариулт олдсонгүй")
+            except Exception as e:
+                print(f"❌ RAG алдаа: {e}")
         
-        # ========== THREAD УДИРДЛАГА ==========
-        # Шинэ асуулт бөгөөд RAG хариулт олдсон бол thread шинэчлэх
-        if question_type == "new" and used_rag:
-            if not thread_id:
-                print("🧵 Шинэ thread үүсгэж байна...")
-                thread = client.beta.threads.create()
-                thread_id = thread.id
-                update_conversation(conv_id, {thread_key: thread_id})
-                print(f"✅ Thread үүсгэлээ: {thread_id}")
+        # AI Assistant функц
+        def run_ai_assistant():
+            nonlocal ai_response_text, ai_success
+            try:
+                print("🤖 AI Assistant ажиллаж байна...")
+                retry_count = 0
+                while retry_count <= MAX_AI_RETRIES:
+                    response = get_ai_response(thread_id, message_content, conv_id, verified_email, retry_count)
+                    
+                    # Хэрэв алдаатай хариулт биш бол амжилттай
+                    if not any(error_phrase in response for error_phrase in [
+                        "алдаа гарлаа", "хэт удаж байна", "олдсонгүй"
+                    ]):
+                        ai_response_text = response
+                        ai_success = True
+                        print(f"✅ AI Assistant амжилттай: {response[:50]}...")
+                        break
+                        
+                    retry_count += 1
+                    if retry_count <= MAX_AI_RETRIES:
+                        print(f"🔄 AI дахин оролдож байна... ({retry_count}/{MAX_AI_RETRIES})")
+                        time.sleep(2)
+                
+                if not ai_success:
+                    print("❌ AI Assistant бүх оролдлого бүтэлгүйтэв")
+                    
+            except Exception as e:
+                print(f"❌ AI Assistant алдаа: {e}")
+        
+        # Хоёр системийг зэрэг ажиллуулах
+        rag_thread = threading.Thread(target=run_rag)
+        ai_thread = threading.Thread(target=run_ai_assistant)
+        
+        # Thread эхлүүлэх
+        rag_thread.start()
+        ai_thread.start()
+        
+        # Хоёуланг нь дуусахыг хүлээх (максимум 45 секунд)
+        rag_thread.join(timeout=30)
+        ai_thread.join(timeout=30)
+        
+        print(f"🔍 Үр дүн: RAG={rag_response['success']}, AI={ai_success}")
+        
+        # ========== ХАРИУЛТУУДЫГ НЭГТГЭХ ==========
+        final_response = ""
+        response_type = ""
+        
+        if rag_response["success"] and ai_success:
+            # Хоёулаа амжилттай бол нэгтгэх
+            print("🎯 Хоёр систем амжилттай - хариултуудыг нэгтгэж байна")
+            
+            final_response = f"📚 **Документаас олсон мэдээлэл:**\n{rag_response['answer']}\n\n"
+            final_response += f"🤖 **AI туслахын нэмэлт зөвлөгөө:**\n{ai_response_text}"
+            
+            # RAG sources нэмэх
+            if rag_response["sources"]:
+                final_response += "\n\n📖 **Холбогдох документууд:**\n"
+                for i, source in enumerate(rag_response["sources"], 1):
+                    title = source.get("title", "Документ")
+                    url = source.get("url", "")
+                    final_response += f"{i}. [{title}]({url})\n"
+            
+            response_type = "RAG + AI Assistant"
+            
+        elif rag_response["success"]:
+            # Зөвхөн RAG амжилттай
+            print("📚 Зөвхөн RAG амжилттай")
+            
+            final_response = rag_response["answer"]
+            
+            # RAG sources нэмэх
+            if rag_response["sources"]:
+                final_response += "\n\n📚 **Холбогдох документууд:**\n"
+                for i, source in enumerate(rag_response["sources"], 1):
+                    title = source.get("title", "Документ")
+                    url = source.get("url", "")
+                    final_response += f"{i}. [{title}]({url})\n"
+            
+            response_type = "RAG"
+            
+        elif ai_success:
+            # Зөвхөн AI Assistant амжилттай
+            print("🤖 Зөвхөн AI Assistant амжилттай")
+            final_response = ai_response_text
+            response_type = "AI Assistant"
+            
+        else:
+            # Хоёулаа бүтэлгүйтэв
+            print("❌ Хоёр систем бүтэлгүйтэв - ажилтанд хуваарилж байна")
+            
+            send_teams_notification(
+                conv_id, 
+                message_content, 
+                verified_email, 
+                "RAG болон AI Assistant хоёулаа бүтэлгүйтэв",
+                f"Thread ID: {thread_id}, Хоёр систем алдаа гаргалаа"
+            )
+            
+            final_response = (
+                "🚨 Уучлаарай, техникийн асуудал гарлаа.\n\n"
+                "Би таны асуултыг техникийн багт дамжуулаа. Удахгүй асуудлыг шийдэж, танд хариулт өгөх болно.\n\n"
+                "🕐 Түр хүлээнэ үү..."
+            )
+            response_type = "Error - Escalated"
         
         # ========== ХАРИУЛТ ИЛГЭЭХ ==========
-        response_type = "RAG" if used_rag else ("Clarification" if not escalate_to_support else "Support Team")
-        send_to_chatwoot(conv_id, ai_response)
-        print(f"✅ {response_type} хариулт илгээлээ: {ai_response[:50]}...")
+        # Chatwoot руу илгээх
+        send_to_chatwoot(conv_id, final_response)
+        print(f"✅ {response_type} хариулт илгээлээ: {final_response[:50]}...")
         
         return jsonify({"status": "success"}), 200
 
@@ -1138,6 +1048,67 @@ def rebuild_docs():
     except Exception as e:
         logger.error(f"Vector store дахин бүтээхэд алдаа: {str(e)}")
         return jsonify({"error": f"Алдаа: {str(e)}"}), 500
+
+def should_escalate_to_teams(thread_id, current_message):
+    """Тухайн асуудлыг Teams-д илгээх хэрэгтэй эсэхийг шийдэх"""
+    try:
+        # OpenAI thread-с сүүлийн 20 мессежийг авах
+        messages = client.beta.threads.messages.list(thread_id=thread_id, limit=20)
+        
+        # Хэрэглэгчийн мессежүүдийг цуглуулах
+        user_messages = []
+        for msg in reversed(messages.data):
+            if msg.role == "user":
+                content = ""
+                for content_block in msg.content:
+                    if hasattr(content_block, 'text'):
+                        content += content_block.text.value
+                if content.strip():
+                    user_messages.append(content.strip())
+        
+        # Хэрэв анхны мессеж бол Teams-д илгээх
+        if len(user_messages) <= 1:
+            return True, "Анхны асуулт"
+        
+        # AI-аар шинэ асуудал мөн эсэхийг шалгах
+        system_msg = (
+            "Та бол чат дүн шинжилгээний мэргэжилтэн. "
+            "Хэрэглэгчийн сүүлийн мессеж нь шинэ асуудал мөн эсэхийг тодорхойлно уу."
+        )
+        
+        user_msg = f'''
+Хэрэглэгчийн өмнөх мессежүүд:
+{chr(10).join(user_messages[:-1])}
+
+Одоогийн мессеж: "{current_message}"
+
+Дараах аль нэгээр хариулна уу:
+- "ШИН_АСУУДАЛ" - хэрэв одоогийн мессеж шинэ төрлийн асуудал бол
+- "ҮРГЭЛЖЛЭЛ" - хэрэв өмнөх асуудлын үргэлжлэл, тодруулга бол
+- "ДАХИН_АСУУЛТ" - хэрэв ижил асуудлыг дахин асууж байгаа бол
+'''
+        
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg}
+            ],
+            max_tokens=50,
+            temperature=0.1
+        )
+        
+        analysis_result = response.choices[0].message.content.strip()
+        
+        if "ШИН_АСУУДАЛ" in analysis_result:
+            return True, "Шинэ асуудал илрэв"
+        else:
+            return False, "Өмнөх асуудлын үргэлжлэл"
+            
+    except Exception as e:
+        print(f"❌ Escalation шийдэх алдаа: {e}")
+        # Алдаа гарвал анхны мессеж гэж үзэх
+        return True, "Алдаа - анхны мессеж гэж үзэв"
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
