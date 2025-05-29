@@ -189,8 +189,9 @@ def search_docs_with_rag(question: str) -> dict:
     try:
         if not qa_chain:
             return {
-                "answer": "Документ хайлтын систем бэлэн биш байна.",
-                "sources": []
+                "answer": None,
+                "sources": [],
+                "confidence": 0
             }
         
         # Get answer with source documents
@@ -198,10 +199,22 @@ def search_docs_with_rag(question: str) -> dict:
         answer = result["result"]
         sources = result.get("source_documents", [])
         
+        # Хариултын чанарыг үнэлэх
+        confidence_score = evaluate_answer_quality(answer, question, sources)
+        
+        # Хэрэв хариулт хангалтгүй бол None буцаах
+        if confidence_score < 0.3:  # 30%-аас бага итгэлтэй бол
+            return {
+                "answer": None,
+                "sources": [],
+                "confidence": confidence_score
+            }
+        
         # Format response with sources
         response = {
             "answer": answer,
-            "sources": []
+            "sources": [],
+            "confidence": confidence_score
         }
         
         # Add unique sources (limit to 3)
@@ -220,20 +233,53 @@ def search_docs_with_rag(question: str) -> dict:
     except Exception as e:
         logger.error(f"RAG хайлтанд алдаа: {str(e)}")
         return {
-            "answer": f"Документ хайлтанд алдаа гарлаа: {str(e)}",
-            "sources": []
+            "answer": None,
+            "sources": [],
+            "confidence": 0
         }
 
-def is_docs_question(message: str) -> bool:
-    """Мессеж нь документын асуулт мөн эсэхийг шалгах"""
-    docs_keywords = [
-        "документ", "заавар", "manual", "гайд", "guide", "хэрхэн", "tutorial",
-        "API", "docs", "documentation", "хичээл", "зөвлөгөө", "жишээ",
-        "код", "code", "function", "method", "класс", "class", "модуль"
-    ]
-    
-    message_lower = message.lower()
-    return any(keyword in message_lower for keyword in docs_keywords)
+def evaluate_answer_quality(answer: str, question: str, sources: list) -> float:
+    """Хариултын чанарыг үнэлэх (0.0 - 1.0)"""
+    try:
+        if not answer or len(answer.strip()) < 10:
+            return 0.0
+        
+        score = 0.0
+        
+        # Sources байгаа эсэхийг шалгах (40% оноо)
+        if sources and len(sources) > 0:
+            score += 0.4
+            # Олон source байвал илүү сайн
+            if len(sources) >= 2:
+                score += 0.1
+        
+        # Хариултын урт шалгах (30% оноо)
+        answer_length = len(answer.strip())
+        if answer_length >= 100:
+            score += 0.3
+        elif answer_length >= 50:
+            score += 0.2
+        elif answer_length >= 20:
+            score += 0.1
+        
+        # Асуулттай холбоотой эсэхийг энгийнээр шалгах (30% оноо)
+        question_words = set(question.lower().split())
+        answer_words = set(answer.lower().split())
+        common_words = question_words.intersection(answer_words)
+        
+        if len(common_words) >= 3:
+            score += 0.3
+        elif len(common_words) >= 2:
+            score += 0.2
+        elif len(common_words) >= 1:
+            score += 0.1
+        
+        # Максимум 1.0 болгох
+        return min(score, 1.0)
+        
+    except Exception as e:
+        logger.error(f"Хариулт үнэлэхэд алдаа: {str(e)}")
+        return 0.5
 
 # Initialize RAG system
 try:
@@ -794,31 +840,30 @@ def webhook():
         ai_response = None
         used_rag = False
         
-        # Хэрэв документын асуулт бол RAG ашиглах
-        if is_docs_question(message_content):
-            print("📖 Документын асуулт илэрлээ - RAG системээр хариулж байна")
+        # Бүх асуултанд RAG системийг эхлээд туршиж үзэх
+        print("📖 RAG системээр хариулт хайж байна...")
+        
+        # RAG-аар хариулт хайх
+        rag_result = search_docs_with_rag(message_content)
+        
+        # RAG хариултын чанарыг шалгах
+        if rag_result["answer"] and rag_result.get("confidence", 0) >= 0.3:
+            # RAG хариултыг форматлах
+            ai_response = rag_result["answer"]
             
-            # RAG-аар хариулт хайх
-            rag_result = search_docs_with_rag(message_content)
+            # Source links нэмэх
+            if rag_result["sources"]:
+                ai_response += "\n\n📚 **Холбогдох документууд:**\n"
+                for i, source in enumerate(rag_result["sources"], 1):
+                    title = source.get("title", "Документ")
+                    url = source.get("url", "")
+                    ai_response += f"{i}. [{title}]({url})\n"
             
-            if rag_result["answer"] and "алдаа гарлаа" not in rag_result["answer"]:
-                # RAG хариултыг форматлах
-                ai_response = rag_result["answer"]
-                
-                # Source links нэмэх
-                if rag_result["sources"]:
-                    ai_response += "\n\n📚 **Холбогдох документууд:**\n"
-                    for i, source in enumerate(rag_result["sources"], 1):
-                        title = source.get("title", "Документ")
-                        url = source.get("url", "")
-                        ai_response += f"{i}. [{title}]({url})\n"
-                
-                used_rag = True
-                print(f"✅ RAG хариулт олдлоо: {ai_response[:100]}...")
-            else:
-                print("❌ RAG хариулт олдсонгүй - AI Assistant-д шилжүүлж байна")
+            used_rag = True
+            print(f"✅ RAG хариулт олдлоо (итгэлтэй: {rag_result.get('confidence', 0):.2f}): {ai_response[:100]}...")
         else:
-            print("💬 Ерөнхий асуулт - AI Assistant-р хариулна")
+            confidence = rag_result.get("confidence", 0)
+            print(f"❌ RAG хариулт хангалтгүй (итгэлтэй: {confidence:.2f}) - AI Assistant-д шилжүүлж байна")
         
         # ========== STANDARD AI ASSISTANT (хэрэв RAG ашиглаагүй бол) ==========
         if not used_rag:
@@ -978,10 +1023,12 @@ def docs_search():
             "question": question,
             "answer": result["answer"],
             "sources": result["sources"],
+            "confidence": result.get("confidence", 0),
+            "has_answer": result["answer"] is not None and result.get("confidence", 0) >= 0.3,
             "timestamp": datetime.utcnow().isoformat()
         }
         
-        logger.info(f"RAG хариулт: {len(result['sources'])} sources олдлоо")
+        logger.info(f"RAG хариулт: {len(result['sources'])} sources олдлоо, итгэлтэй: {result.get('confidence', 0):.2f}")
         return jsonify(response), 200
         
     except Exception as e:
