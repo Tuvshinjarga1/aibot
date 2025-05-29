@@ -250,90 +250,6 @@ except Exception as e:
     logger.error(f"Failed to initialize RAG system: {str(e)}")
     qa_chain = None
 
-# =============== АСУУДАЛ TRACKING СИСТЕМИЙН ФУНКЦУУД ===============
-
-def get_conversation_topic_state(conv_id, contact_id):
-    """Conversation-ий одоогийн асуудлын төлөвийг авах"""
-    try:
-        conv = get_conversation(conv_id)
-        conv_attrs = conv.get("custom_attributes", {})
-        
-        return {
-            "current_topic": conv_attrs.get("current_topic", ""),
-            "topic_handled_by_rag": conv_attrs.get("topic_handled_by_rag", "false"),
-            "last_rag_attempt": conv_attrs.get("last_rag_attempt", ""),
-            "escalated_to_support": conv_attrs.get("escalated_to_support", "false"),
-            "topic_created_at": conv_attrs.get("topic_created_at", ""),
-            "pending_escalation": conv_attrs.get("pending_escalation", "false"),
-            "escalation_reason": conv_attrs.get("escalation_reason", ""),
-            "waiting_for_user_response": conv_attrs.get("waiting_for_user_response", "false")
-        }
-    except Exception as e:
-        print(f"❌ Topic state авахад алдаа: {e}")
-        return {
-            "current_topic": "",
-            "topic_handled_by_rag": "false", 
-            "last_rag_attempt": "",
-            "escalated_to_support": "false",
-            "topic_created_at": "",
-            "pending_escalation": "false",
-            "escalation_reason": "",
-            "waiting_for_user_response": "false"
-        }
-
-def update_conversation_topic_state(conv_id, updates):
-    """Conversation-ий асуудлын төлөвийг шинэчлэх"""
-    try:
-        update_conversation(conv_id, updates)
-        print(f"✅ Topic state шинэчлэгдлээ: {updates}")
-    except Exception as e:
-        print(f"❌ Topic state шинэчлэхэд алдаа: {e}")
-
-def is_new_topic(current_message, previous_topic, thread_id):
-    """Одоогийн мессеж шинэ асуудал мөн эсэхийг тодорхойлох"""
-    if not previous_topic:
-        return True, "Анхны асуудал"
-    
-    try:
-        # OpenAI-аар шинэ асуудал мөн эсэхийг шалгах
-        system_msg = (
-            "Та бол чат дүн шинжилгээний мэргэжилтэн. "
-            "Хэрэглэгчийн одоогийн мессеж өмнөх асуудалтай холбоотой эсвэл шинэ асуудал мөн эсэхийг тодорхойлно уу."
-        )
-        
-        user_msg = f'''
-Өмнөх асуудал: "{previous_topic}"
-
-Одоогийн мессеж: "{current_message}"
-
-Дараах аль нэгээр хариулна уу:
-- "ШИНЭ_АСУУДАЛ" - хэрэв одоогийн мессеж өмнөх асуудалтай огт холбоогүй шинэ асуудал бол
-- "ХОЛБООТОЙ" - хэрэв өмнөх асуудлын үргэлжлэл, нэмэлт асуулт, тодруулга бол
-'''
-        
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg}
-            ],
-            max_tokens=50,
-            temperature=0.1,
-            timeout=10
-        )
-        
-        analysis_result = response.choices[0].message.content.strip()
-        
-        if "ШИНЭ_АСУУДАЛ" in analysis_result:
-            return True, "AI: Шинэ асуудал илрэв"
-        else:
-            return False, "AI: Өмнөх асуудалтай холбоотой"
-            
-    except Exception as e:
-        print(f"❌ Topic анализ хийхэд алдаа: {e}")
-        # Fallback: хэрэв алдаа гарвал шинэ асуудал гэж үзэх
-        return True, "Алдаа - шинэ асуудал гэж үзэв"
-
 # =============== CHATWOOT ФУНКЦУУД ===============
 
 def is_valid_email(email):
@@ -366,12 +282,6 @@ def send_verification_email(email, token):
     try:
         verification_url = f"{VERIFICATION_URL_BASE}/verify?token={token}"
         
-        print(f"📧 Имэйл илгээхэд бэлтгэж байна...")
-        print(f"   📮 Хэнд: {email}")
-        print(f"   🌐 Verification URL: {verification_url}")
-        print(f"   📬 SMTP Server: {SMTP_SERVER}:{SMTP_PORT}")
-        print(f"   👤 Sender: {SENDER_EMAIL}")
-        
         msg = MIMEMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = email
@@ -393,27 +303,15 @@ def send_verification_email(email, token):
         
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
-        print(f"📨 SMTP серверт холбогдож байна...")
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
-        print(f"🔐 Login хийж байна...")
         server.login(SENDER_EMAIL, SENDER_PASSWORD)
-        print(f"📤 Имэйл илгээж байна...")
         server.send_message(msg)
         server.quit()
         
-        print(f"✅ Имэйл амжилттай илгээлээ: {email}")
         return True
     except Exception as e:
-        print(f"❌ Имэйл илгээхэд алдаа: {e}")
-        print(f"   📧 Target email: {email}")
-        print(f"   🔧 SMTP config: {SMTP_SERVER}:{SMTP_PORT}")
-        print(f"   👤 Sender: {SENDER_EMAIL}")
-        
-        # Алдааны дэлгэрэнгүй мэдээлэл
-        import traceback
-        print(f"   📄 Full error: {traceback.format_exc()}")
-        
+        print(f"Имэйл илгээхэд алдаа: {e}")
         return False
 
 def get_contact(contact_id):
@@ -879,66 +777,79 @@ def webhook():
         # ========== AI CHATBOT АЖИЛЛУУЛАХ ==========
         print(f"🤖 Баталгаажсан хэрэглэгч ({verified_email}) - AI chatbot ажиллуулж байна")
         
-        # ========== АСУУДАЛ TRACKING СИСТЕМИЙН ШАЛГАЛТ ==========
-        print("🔍 Асуудлын төлөв шалгаж байна...")
+        # ========== АСУУЛТЫН ТӨРЛИЙГ ТОДОРХОЙЛОХ ==========
+        print("🔍 Асуултын төрлийг шалгаж байна...")
         
-        # Одоогийн асуудлын төлөвийг авах
-        topic_state = get_conversation_topic_state(conv_id, contact_id)
-        current_topic = topic_state["current_topic"]
-        topic_handled_by_rag = topic_state["topic_handled_by_rag"] == "true"
-        escalated_to_support = topic_state["escalated_to_support"] == "true"
-        pending_escalation = topic_state["pending_escalation"] == "true"
-        waiting_for_user_response = topic_state["waiting_for_user_response"] == "true"
+        # Thread мэдээлэл авах (асуултын түүх шалгахын тулд)
+        conv = get_conversation(conv_id)
+        conv_attrs = conv.get("custom_attributes", {})
         
-        print(f"📊 Асуудлын төлөв: topic='{current_topic}', rag_handled={topic_handled_by_rag}, escalated={escalated_to_support}")
-        print(f"🔄 Escalation төлөв: pending={pending_escalation}, waiting={waiting_for_user_response}")
+        thread_key = f"openai_thread_{contact_id}"
+        thread_id = conv_attrs.get(thread_key)
         
-        # ========== ESCALATION ХАРИУЛТ ШАЛГАХ ==========
-        if pending_escalation and waiting_for_user_response:
-            print("⏳ Хэрэглэгчээс escalation хариулт хүлээж байсан - боловсруулж байна...")
-            
-            # Хэрэглэгчийн хариултыг боловсруулах
-            escalation_handled = handle_escalation_response(conv_id, contact_id, message_content, topic_state)
-            
-            if escalation_handled:
-                # Escalation боловсруулагдсан - workflow дуусна
-                return jsonify({"status": "escalation_handled"}), 200
-            else:
-                # Escalation цуцлагдсан эсвэл шинэ асуулт - үргэлжлүүлэх
-                print("🔄 Escalation цуцлагдсан эсвэл шинэ асуулт - normal process үргэлжлүүлэх")
-                # Topic state-г дахин авах (handle_escalation_response-д өөрчлөгдсөн байж болно)
-                topic_state = get_conversation_topic_state(conv_id, contact_id)
-                current_topic = topic_state["current_topic"]
-                topic_handled_by_rag = topic_state["topic_handled_by_rag"] == "true"
-                escalated_to_support = topic_state["escalated_to_support"] == "true"
-        
-        # Шинэ асуудал мөн эсэхийг шалгах (pending escalation байхгүй үед л)
-        if not (pending_escalation and waiting_for_user_response):
-            is_new, new_topic_reason = is_new_topic(message_content, current_topic, None)
-            print(f"🆕 Асуудлын шинжилгээ: {new_topic_reason}")
-        else:
-            # Escalation process дундаас гарч ирсэн бол шинэ асуудал гэж үзэх
-            is_new = True
-            new_topic_reason = "Escalation process-оос гарсан"
+        # Хэрэв thread байгаа бол өмнөх асуудалтай холбоотой эсэхийг шалгах
+        is_follow_up = False
+        if thread_id:
+            try:
+                print("📋 Өмнөх асуудалтай холбоотой эсэхийг шалгаж байна...")
+                is_follow_up, reason = is_follow_up_question(thread_id, message_content)
+                print(f"🔍 Шалгалтын үр дүн: {reason}")
+            except Exception as e:
+                print(f"❌ Follow-up шалгахад алдаа: {e}")
+                is_follow_up = False
         
         ai_response = None
         used_rag = False
         
-        # ========== АСУУДЛЫН ТӨРЛӨӨР ШИЙДЭХ ==========
+        # ========== FOLLOW-UP АСУУЛТ БОЛ TEAMS-Д ШИЛЖҮҮЛЭХ ==========
+        if is_follow_up:
+            print("🔄 Өмнөх асуудалтай холбоотой асуулт - дэмжлэгийн багт шилжүүлж байна")
+            
+            try:
+                # AI-ээр асуудлыг дүгнэх
+                analysis = analyze_customer_issue(thread_id, message_content, verified_email)
+                print(f"✅ Дүгнэлт бэлэн: {analysis[:100]}...")
+                
+                # Teams-ээр мэдээлэх
+                send_teams_notification(
+                    conv_id,
+                    message_content,
+                    verified_email,
+                    "Өмнөх асуудалтай холбоотой дахин асуулт",
+                    analysis
+                )
+                print("✅ Дэмжлэгийн багт шилжүүллээ")
+                
+                ai_response = (
+                    "🔄 Таны асуулт өмнөх асуудалтай холбоотой байна.\n\n"
+                    "Би таны асуултыг дэмжлэгийн багт шилжүүлэв. "
+                    "Мэргэжилтэн удахгүй танд хариулт өгөх болно.\n\n"
+                    "🕐 Түр хүлээнэ үү..."
+                )
+                
+            except Exception as e:
+                print(f"❌ Teams мэдээлэхэд алдаа: {e}")
+                ai_response = (
+                    "🚨 Уучлаарай, техникийн асуудал гарлаа.\n\n"
+                    "Таны асуултыг дэмжлэгийн багт шилжүүлэх гэж байгаад алдаа гарлаа. "
+                    "Дахин оролдоно уу.\n\n"
+                    "🕐 Түр хүлээнэ үү..."
+                )
         
-        if is_new:
-            print("🆕 Шинэ асуудал илэрлээ - RAG системээр хайж байна...")
+        # ========== ШИНЭ АСУУЛТ БОЛ RAG СИСТЕМЭЭР ХАЙХ ==========
+        else:
+            print("🆕 Шинэ асуулт - RAG системээр хайж байна...")
             
             # RAG-аар хариулт хайх
             rag_result = search_docs_with_rag(message_content)
             
-            # RAG хариултыг шалгах
+            # RAG хариултыг шалгах - алдаа эсвэл хоосон биш хариулт
             if (rag_result["answer"] and 
                 "алдаа гарлаа" not in rag_result["answer"].lower() and 
                 "документ хайлтанд алдаа" not in rag_result["answer"].lower() and
-                len(rag_result["answer"].strip()) > 20):
+                len(rag_result["answer"].strip()) > 20):  # Хангалттай урт хариулт
                 
-                # RAG хариулт олдлоо
+                # RAG хариултыг форматлах
                 ai_response = rag_result["answer"]
                 
                 # Source links нэмэх
@@ -950,66 +861,21 @@ def webhook():
                         ai_response += f"{i}. [{title}]({url})\n"
                 
                 used_rag = True
+                print(f"✅ RAG хариулт олдлоо: {ai_response[:100]}...")
                 
-                # Асуудлын төлөвийг шинэчлэх
-                update_conversation_topic_state(conv_id, {
-                    "current_topic": message_content[:200],  # Хязгаарлах
-                    "topic_handled_by_rag": "true",
-                    "last_rag_attempt": datetime.utcnow().isoformat(),
-                    "escalated_to_support": "false",
-                    "topic_created_at": datetime.utcnow().isoformat()
-                })
-                
-                print(f"✅ RAG хариулт олдож, асуудлын төлөв шинэчлэгдлээ")
+                # Thread үүсгэх эсвэл шинэчлэх (RAG хариулт олдсон үед)
+                if not thread_id:
+                    print("🧵 Шинэ thread үүсгэж байна...")
+                    thread = client.beta.threads.create()
+                    thread_id = thread.id
+                    update_conversation(conv_id, {thread_key: thread_id})
+                    print(f"✅ Thread үүсгэлээ: {thread_id}")
                 
             else:
                 print("❌ RAG-аас хангалттай хариулт олдсонгүй - AI Assistant-д шилжүүлж байна")
-                
-                # Асуудлын төлөвийг шинэчлэх (RAG бүтэлгүйтсэн)
-                update_conversation_topic_state(conv_id, {
-                    "current_topic": message_content[:200],
-                    "topic_handled_by_rag": "false", 
-                    "last_rag_attempt": datetime.utcnow().isoformat(),
-                    "escalated_to_support": "false",
-                    "topic_created_at": datetime.utcnow().isoformat()
-                })
-                
-        else:
-            print("🔄 Өмнөх асуудалтай холбоотой асуулт...")
-            
-            if topic_handled_by_rag and not escalated_to_support:
-                print("📞 RAG-аар хариулсан асуудлын үргэлжлэл - хэрэглэгчээс зөвшөөрөл асууж байна")
-                
-                # Escalation шалтгаан бэлтгэх
-                escalation_reason = f"RAG системээр хариулсан '{current_topic[:100]}' асуудлын нэмэлт асуулт"
-                
-                # Хэрэглэгчээс зөвшөөрөл асуух
-                ask_user_for_escalation_permission(conv_id, escalation_reason)
-                
-                # Pending state тохируулах
-                update_conversation_topic_state(conv_id, {
-                    "pending_escalation": "true",
-                    "escalation_reason": escalation_reason,
-                    "waiting_for_user_response": "true"
-                })
-                
-                print("✅ Хэрэглэгчээс escalation зөвшөөрөл асуулаа - хариулт хүлээж байна")
-                return jsonify({"status": "waiting_for_escalation_response"}), 200
-                
-            elif not topic_handled_by_rag and not escalated_to_support:
-                print("🤖 RAG бүтэлгүйтсэн асуудлын үргэлжлэл - AI Assistant ашиглах")
-                # AI Assistant руу явуулах (доорх кодын дагуу)
-                
-            elif escalated_to_support:
-                print("📞 Аль хэдийн дэмжлэгийн багт илгээсэн асуудал")
-                ai_response = (
-                    "📞 Таны асуудлыг аль хэдийн манай дэмжлэгийн багт дамжуулсан байна.\n\n"
-                    "Тэд удахгүй танд хариулж, дэлгэрэнгүй тусламж үзүүлэх болно.\n\n"
-                    "🕐 Түр хүлээнэ үү..."
-                )
         
-        # ========== STANDARD AI ASSISTANT (хэрэв RAG ашиглаагүй бол) ==========
-        if not used_rag and not ai_response:
+        # ========== STANDARD AI ASSISTANT (хэрэв RAG ашиглаагүй бөгөөд follow-up биш бол) ==========
+        if not used_rag and not is_follow_up:
             print("🤖 Standard AI Assistant ашиглаж байна...")
             
             # Thread мэдээлэл авах
@@ -1068,25 +934,9 @@ def webhook():
         
         # ========== ХАРИУЛТ ИЛГЭЭХ ==========
         # Chatwoot руу илгээх
-        response_type = "RAG" if used_rag else ("Topic-based" if ai_response else "AI Assistant")
+        response_type = "RAG" if used_rag else "AI Assistant" if not is_follow_up else "Teams Escalation"
         send_to_chatwoot(conv_id, ai_response)
         print(f"✅ {response_type} хариулт илгээлээ: {ai_response[:50]}...")
-        
-        # ========== TEAMS МЭДЭЭЛЭЛ (зөвхөн AI Assistant-д) ==========
-        # Шинэ асуудал tracking системд Teams мэдээлэл аль хэдийн хийгдсэн
-        # Зөвхөн AI Assistant алдаа гарсан үед Teams мэдээлэх
-        if not used_rag and not ai_response:
-            # Энэ тохиолдол бол AI Assistant алдаа гарсан үе
-            print("❌ AI Assistant алдаа - Teams мэдээлэх")
-            send_teams_notification(
-                conv_id,
-                message_content,
-                verified_email,
-                "AI Assistant алдаа гарлаа",
-                "AI Assistant хариулт өгөж чадсангүй"
-            )
-        else:
-            print("✅ Teams мэдээлэх шаардлагагүй - шинэ topic tracking системд хийгдсэн")
         
         return jsonify({"status": "success"}), 200
 
@@ -1210,8 +1060,8 @@ def rebuild_docs():
         logger.error(f"Vector store дахин бүтээхэд алдаа: {str(e)}")
         return jsonify({"error": f"Алдаа: {str(e)}"}), 500
 
-def should_escalate_to_teams(thread_id, current_message):
-    """Тухайн асуудлыг Teams-д илгээх хэрэгтэй эсэхийг шийдэх"""
+def is_follow_up_question(thread_id, current_message):
+    """Өмнөх асуудалтай холбоотой асуулт мөн эсэхийг шалгах"""
     try:
         # OpenAI thread-с сүүлийн 20 мессежийг авах
         messages = client.beta.threads.messages.list(thread_id=thread_id, limit=20)
@@ -1227,14 +1077,14 @@ def should_escalate_to_teams(thread_id, current_message):
                 if content.strip():
                     user_messages.append(content.strip())
         
-        # Хэрэв анхны мессеж бол Teams-д илгээх
+        # Хэрэв анхны мессеж бол шинэ асуулт (RAG ашиглах)
         if len(user_messages) <= 1:
-            return True, "Анхны асуулт"
+            return False, "Анхны асуулт - RAG ашиглана"
         
         # AI-аар шинэ асуудал мөн эсэхийг шалгах
         system_msg = (
             "Та бол чат дүн шинжилгээний мэргэжилтэн. "
-            "Хэрэглэгчийн сүүлийн мессеж нь шинэ асуудал мөн эсэхийг тодорхойлно уу."
+            "Хэрэглэгчийн сүүлийн мессеж нь өмнөх асуудалтай холбоотой эсэхийг тодорхойлно уу."
         )
         
         user_msg = f'''
@@ -1244,9 +1094,8 @@ def should_escalate_to_teams(thread_id, current_message):
 Одоогийн мессеж: "{current_message}"
 
 Дараах аль нэгээр хариулна уу:
-- "ШИН_АСУУДАЛ" - хэрэв одоогийн мессеж шинэ төрлийн асуудал бол
-- "ҮРГЭЛЖЛЭЛ" - хэрэв өмнөх асуудлын үргэлжлэл, тодруулга бол
-- "ДАХИН_АСУУЛТ" - хэрэв ижил асуудлыг дахин асууж байгаа бол
+- "ШИНЭ_АСУУДАЛ" - хэрэв одоогийн мессеж өмнөхтэй огт холбоогүй шинэ асуудал бол
+- "ХОЛБООТОЙ" - хэрэв өмнөх асуудлын үргэлжлэл, тодруулга бол
 '''
         
         response = client.chat.completions.create(
@@ -1261,169 +1110,15 @@ def should_escalate_to_teams(thread_id, current_message):
         
         analysis_result = response.choices[0].message.content.strip()
         
-        if "ШИН_АСУУДАЛ" in analysis_result:
-            return True, "Шинэ асуудал илрэв"
+        if "ХОЛБООТОЙ" in analysis_result:
+            return True, "Өмнөх асуудалтай холбоотой - Teams-д шилжүүлнэ"
         else:
-            return False, "Өмнөх асуудлын үргэлжлэл"
+            return False, "Шинэ асуудал - RAG ашиглана"
             
     except Exception as e:
-        print(f"❌ Escalation шийдэх алдаа: {e}")
-        # Алдаа гарвал анхны мессеж гэж үзэх
-        return True, "Алдаа - анхны мессеж гэж үзэв"
-
-def analyze_user_response_for_escalation(message, pending_reason=""):
-    """Хэрэглэгчийн хариултыг шинжлэн escalation хийх эсэхийг шийдэх"""
-    try:
-        system_msg = (
-            "Та бол хэрэглэгчийн хариултыг шинжлэгч. "
-            "Хэрэглэгч дэмжлэгийн багт шилжүүлэх асуудлын талаар хариулж байна. "
-            "Тэдний хариултыг шинжлэн тийм эсвэл үгүй гэсэн хариултыг олж өгнө үү."
-        )
-        
-        user_msg = f'''
-Дэмжлэгийн багт шилжүүлэх шалтгаан: "{pending_reason}"
-
-Хэрэглэгчийн хариулт: "{message}"
-
-Дараах аль нэгээр хариулна уу:
-- "ТИЙМ" - хэрэв хэрэглэгч дэмжлэгийн багт шилжүүлэхийг зөвшөөрч байвал
-- "ҮГҮЙ" - хэрэв хэрэглэгч татгалзаж байвал  
-- "ТОДОРХОЙГҮЙ" - хэрэв хариулт тодорхой биш байвал
-- "ШИН_АСУУЛТ" - хэрэв хэрэглэгч шинэ асуулт асууж байвал
-'''
-        
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg}
-            ],
-            max_tokens=50,
-            temperature=0.1,
-            timeout=10
-        )
-        
-        analysis_result = response.choices[0].message.content.strip()
-        
-        if "ТИЙМ" in analysis_result:
-            return "approve", "Хэрэглэгч зөвшөөрлөө"
-        elif "ҮГҮЙ" in analysis_result:
-            return "reject", "Хэрэглэгч татгалзлаа"
-        elif "ШИН_АСУУЛТ" in analysis_result:
-            return "new_question", "Шинэ асуулт илрэв"
-        else:
-            return "unclear", "Тодорхой бус хариулт"
-            
-    except Exception as e:
-        print(f"❌ Хэрэглэгчийн хариулт шинжлэхэд алдаа: {e}")
-        return "unclear", "Алдаа гарлаа"
-
-def ask_user_for_escalation_permission(conv_id, escalation_reason):
-    """Хэрэглэгчээс дэмжлэгийн багт шилжүүлэх зөвшөөрөл асуух"""
-    message = f"""🤔 Таны асуудлын талаар:
-
-**{escalation_reason}**
-
-Би энэ асуудлыг манай дэмжлэгийн мэргэжилтэнд дамжуулж болох уу? Тэд танд илүү дэлгэрэнгүй тусламж үзүүлэх боломжтой.
-
-🔹 **"Тийм"** - дэмжлэгийн багт дамжуулах
-🔹 **"Үгүй"** - би өөрөө хариулж өгье  
-🔹 **Өөр асуулт байвал** - шинэ асуултаа асуугаарай
-
-Яаж төлөвлөж байна вэ?"""
-    
-    send_to_chatwoot(conv_id, message)
-    print(f"❓ Хэрэглэгчээс escalation зөвшөөрөл асуулаа: {escalation_reason}")
-
-def handle_escalation_response(conv_id, contact_id, user_response, topic_state):
-    """Хэрэглэгчийн escalation хариултыг боловсруулах"""
-    escalation_reason = topic_state.get("escalation_reason", "")
-    
-    response_type, reason = analyze_user_response_for_escalation(user_response, escalation_reason)
-    
-    print(f"📊 Escalation хариултын анализ: {response_type} - {reason}")
-    
-    if response_type == "approve":
-        # Хэрэглэгч зөвшөөрлөө - дэмжлэгийн багт илгээх
-        print("✅ Хэрэглэгч зөвшөөрлөө - Teams-д илгээж байна")
-        
-        # Teams мэдээлэх
-        verified_email = get_verified_email(contact_id)
-        ai_analysis = analyze_customer_issue(None, user_response, verified_email)
-        
-        send_teams_notification(
-            conv_id,
-            user_response,
-            verified_email,
-            f"Хэрэглэгч зөвшөөрсөн escalation: {escalation_reason}",
-            ai_analysis
-        )
-        
-        # State шинэчлэх
-        update_conversation_topic_state(conv_id, {
-            "escalated_to_support": "true",
-            "pending_escalation": "false",
-            "waiting_for_user_response": "false"
-        })
-        
-        response_msg = (
-            "✅ Таны асуудлыг манай дэмжлэгийн мэргэжилтэнд дамжуулалаа.\n\n"
-            "Тэд удахгүй танд хариулж, дэлгэрэнгүй тусламж үзүүлэх болно.\n\n"
-            "🕐 Түр хүлээнэ үү..."
-        )
-        send_to_chatwoot(conv_id, response_msg)
-        return True
-        
-    elif response_type == "reject":
-        # Хэрэглэгч татгалзсан - AI Assistant ашиглах
-        print("❌ Хэрэглэгч татгалзсан - AI Assistant ашиглах")
-        
-        # State цэвэрлэх
-        update_conversation_topic_state(conv_id, {
-            "pending_escalation": "false",
-            "waiting_for_user_response": "false"
-        })
-        
-        response_msg = (
-            "👌 Ойлголоо! Би өөрөө танд туслахыг хичээж үзье.\n\n"
-            "Асуултаа дахин асуугаарай, би сайн хариулт өгөхийг хичээнэ."
-        )
-        send_to_chatwoot(conv_id, response_msg)
-        return False
-        
-    elif response_type == "new_question":
-        # Шинэ асуулт - state цэвэрлэх
-        print("🆕 Шинэ асуулт илэрлээ - state цэвэрлэж байна")
-        
-        update_conversation_topic_state(conv_id, {
-            "pending_escalation": "false",
-            "waiting_for_user_response": "false",
-            "current_topic": "",
-            "topic_handled_by_rag": "false"
-        })
-        
-        return False  # Шинэ асуултыг normal process-оор боловсруулах
-        
-    else:
-        # Тодорхой бус хариулт - дахин асуух
-        print("❓ Тодорхой бус хариулт - дахин тодруулж асууж байна")
-        
-        clarify_msg = (
-            "🤔 Би таны хариултыг бүрэн ойлгосонгүй.\n\n"
-            "Дэмжлэгийн багт дамжуулахыг хүсэж байна уу?\n\n"
-            "🔹 **\"Тийм\"** эсвэл **\"Үгүй\"** гэж тодорхой хариулна уу\n"
-            "🔹 Эсвэл шинэ асуултаа бичээрэй"
-        )
-        send_to_chatwoot(conv_id, clarify_msg)
-        return True  # Хариулт хүлээсээр байх
-
-def get_verified_email(contact_id):
-    """Contact-ийн баталгаажуулсан имэйл авах"""
-    try:
-        contact = get_contact(contact_id)
-        return contact.get("custom_attributes", {}).get("verified_email", "")
-    except:
-        return ""
+        print(f"❌ Follow-up шалгахад алдаа: {e}")
+        # Алдаа гарвал шинэ асуулт гэж үзэх (RAG ашиглах)
+        return False, "Алдаа - шинэ асуулт гэж үзэв"
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
