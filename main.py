@@ -203,7 +203,7 @@ def search_docs_with_rag(question: str) -> dict:
         confidence_score = evaluate_answer_quality(answer, question, sources)
         
         # Хэрэв хариулт хангалтгүй бол None буцаах
-        if confidence_score < 0.3:  # 30%-аас бага итгэлтэй бол
+        if confidence_score < 0.25:  # 25%-аас бага итгэлтэй бол
             return {
                 "answer": None,
                 "sources": [],
@@ -409,15 +409,15 @@ def send_to_chatwoot(conv_id, text):
     r = requests.post(url, json=payload, headers=headers)
     r.raise_for_status()
 
-def analyze_customer_issue(thread_id, current_message, customer_email=None):
-    """AI ашиглан хэрэглэгчийн бүх чат түүхийг дүгнэж, comprehensive мэдээлэл өгөх"""
+def analyze_undocumented_issue(thread_id, current_message, customer_email=None, rag_result=None):
+    """Документээс олдохгүй асуудлыг AI-аар дүгнэж дэмжлэгийн багт илгээх"""
     try:
-        # OpenAI thread-с сүүлийн 10 мессежийг л авах (performance сайжруулах)
+        # OpenAI thread-с сүүлийн 10 мессежийг авах
         messages = client.beta.threads.messages.list(thread_id=thread_id, limit=10)
         
         # Хэрэглэгчийн мессежүүдийг цуглуулах
         conversation_history = []
-        for msg in reversed(messages.data):  # Эхнээс нь эрэмбэлэх
+        for msg in reversed(messages.data):
             if msg.role == "user":
                 content = ""
                 for content_block in msg.content:
@@ -425,64 +425,71 @@ def analyze_customer_issue(thread_id, current_message, customer_email=None):
                         content += content_block.text.value
                 if content.strip():
                     conversation_history.append(f"Хэрэглэгч: {content.strip()}")
-            elif msg.role == "assistant":
-                content = ""
-                for content_block in msg.content:
-                    if hasattr(content_block, 'text'):
-                        content += content_block.text.value
-                if content.strip():
-                    conversation_history.append(f"AI: {content.strip()[:100]}...")  # Хязгаарлах
         
-        # Хэрэв чат түүх хоосон бол зөвхөн одоогийн мессежээр дүгнэх
+        # Хэрэв чат түүх хоосон бол одоогийн мессежээр дүгнэх
         if not conversation_history:
             conversation_history = [f"Хэрэглэгч: {current_message}"]
         
-        # Conversation түүхийг string болгох (сүүлийн 5 мессеж)
-        chat_history = "\n".join(conversation_history[-5:])  # Хязгаарлах
+        # Conversation түүхийг string болгох
+        chat_history = "\n".join(conversation_history[-5:])
         
-        # Илүү тодорхой system prompt
+        # RAG хайлтын үр дүнгийн мэдээлэл
+        rag_info = ""
+        if rag_result:
+            confidence = rag_result.get("confidence", 0)
+            sources_count = len(rag_result.get("sources", []))
+            rag_info = f"RAG хайлт: {sources_count} эх сурвалж олдсон, итгэлтэй байдал: {confidence:.2f}"
+        
+        # Дэлгэрэнгүй system prompt
         system_msg = (
             "Та бол дэмжлэгийн мэргэжилтэн. "
-            "Хэрэглэгчийн бүх чат түүхийг харж, асуудлыг иж бүрэн дүгнэж өгнө үү. "
-            "Хэрэв олон асуудал байвал гол асуудлыг тодорхойлж фокуслана уу."
+            "Хэрэглэгчийн асуудлыг документаас олдохгүй тул дэлгэрэнгүй дүгнэж, "
+            "дэмжлэгийн багт тодорхой зөвлөмж өгнө үү."
         )
 
-        # Богино user prompt
         user_msg = f'''Хэрэглэгчийн чат түүх:
 {chat_history}
 
-Одоогийн мессеж: "{current_message}"
+Одоогийн асуулт: "{current_message}"
 
-Дараах форматаар товч дүгнэлт өгнө үү:
+{rag_info}
 
-АСУУДЛЫН ТӨРӨЛ: [Техникийн/Худалдааны/Мэдээллийн/Гомдол]
-ЯАРАЛТАЙ БАЙДАЛ: [Өндөр/Дунд/Бага] 
-ТОВЧ ТАЙЛБАР: [1 өгүүлбэрээр]
-ШААРДЛАГАТАЙ АРГА ХЭМЖЭЭ: [Товч]'''
+Дараах форматаар дэлгэрэнгүй дүгнэлт өгнө үү:
+
+АСУУДЛЫН ТӨРӨЛ: [Техникийн/Худалдааны/Мэдээллийн/Гомдол/Шинэ хүсэлт]
+ЯАРАЛТАЙ БАЙДАЛ: [Өндөр/Дунд/Бага]
+ДОКУМЕНТ ХАМРАХ ХЭРЭГТЭЙ: [Тийм/Үгүй]
+АСУУДЛЫН ДЭЛГЭРЭНГҮЙ ТАЙЛБАР: [2-3 өгүүлбэрээр]
+БОЛОМЖИТ ШИЙДЭЛ: [Дэмжлэгийн багийн хийх ёстой арга хэмжээ]
+ХҮЛЭЭГДЭЖ БУЙ ХАРИУЛТ: [Хэрэглэгчид өгөх ёстой хариултын төрөл]
+АНХААРАХ ЗҮЙЛ: [Тусгай анхаарах шаардлагатай зүйлс]'''
 
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",  # gpt-4-ээс хурдан
+            model="gpt-4",
             messages=[
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg}
             ],
-            max_tokens=200,  # Хязгаарлах
+            max_tokens=400,
             temperature=0.2,
-            timeout=15  # 15 секундын timeout
+            timeout=20
         )
 
         return response.choices[0].message.content.strip()
 
     except Exception as e:
-        print(f"❌ Асуудал дүгнэхэд алдаа: {e}")
+        print(f"❌ Документээс олдохгүй асуудал дүгнэхэд алдаа: {e}")
         # Fallback дүгнэлт
         return f"""АСУУДЛЫН ТӨРӨЛ: Тодорхойгүй
 ЯАРАЛТАЙ БАЙДАЛ: Дунд
-ТОВЧ ТАЙЛБАР: {current_message[:100]}
-ШААРДЛАГАТАЙ АРГА ХЭМЖЭЭ: Ажилтны анхаарал шаардлагатай"""
+ДОКУМЕНТ ХАМРАХ ХЭРЭГТЭЙ: Тийм
+АСУУДЛЫН ДЭЛГЭРЭНГҮЙ ТАЙЛБАР: {current_message[:200]}
+БОЛОМЖИТ ШИЙДЭЛ: Дэмжлэгийн мэргэжилтний анхаарал шаардлагатай
+ХҮЛЭЭГДЭЖ БУЙ ХАРИУЛТ: Асуудлын тодорхой хариулт
+АНХААРАХ ЗҮЙЛ: Документээс олдохгүй шинэ асуудал"""
 
 def send_teams_notification(conv_id, customer_message, customer_email=None, escalation_reason="Хэрэглэгчийн асуудал", ai_analysis=None):
-    """Microsoft Teams руу техникийн асуудлын талаар ажилтанд мэдээлэх"""
+    """Microsoft Teams руу документээс олдохгүй асуудлын талаар дэмжлэгийн багт мэдээлэх"""
     if not TEAMS_WEBHOOK_URL:
         print("⚠️ Teams webhook URL тохируулаагүй байна")
         return False
@@ -490,11 +497,6 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
     try:
         # Chatwoot conversation URL
         conv_url = f"{CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conv_id}"
-        
-        # AI асуудлын дэлгэрэнгүй мэдээлэл бэлтгэх
-        error_summary = escalation_reason
-        if ai_analysis:
-            error_summary += f"\n\nДэлгэрэнгүй анализ: {ai_analysis}"
         
         # Teams message format
         teams_message = {
@@ -508,14 +510,14 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
                     "body": [
                         {
                             "type": "TextBlock",
-                            "text": "📋 Хэрэглэгчийн асуудлын дүгнэлт",
+                            "text": "📋 Документээс олдохгүй асуудал",
                             "weight": "Bolder",
                             "size": "Medium",
                             "color": "Attention"
                         },
                         {
                             "type": "TextBlock",
-                            "text": "AI систем хэрэглэгчийн асуудлыг дүгнэж, ажилтны анхаарал татахуйц асуудал гэж үзэж байна.",
+                            "text": "RAG систем документаас хариулт олж чадаагүй. AI дүгнэлт хийж, дэмжлэгийн багт дамжуулж байна.",
                             "wrap": True,
                             "color": "Default"
                         },
@@ -527,12 +529,16 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
                                     "value": customer_email or "Тодорхойгүй"
                                 },
                                 {
-                                    "title": "Хэрэглэгчийн мессеж:",
+                                    "title": "Хэрэглэгчийн асуулт:",
                                     "value": customer_message[:300] + ("..." if len(customer_message) > 300 else "")
                                 },
                                 {
                                     "title": "Хугацаа:",
                                     "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                },
+                                {
+                                    "title": "Шалтгаан:",
+                                    "value": escalation_reason
                                 }
                             ]
                         }
@@ -569,114 +575,12 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
         
         response = requests.post(TEAMS_WEBHOOK_URL, json=teams_message)
         response.raise_for_status()
-        print(f"✅ Teams техникийн мэдээлэл илгээлээ: {escalation_reason}")
+        print(f"✅ Teams мэдээлэл илгээлээ: {escalation_reason}")
         return True
         
     except Exception as e:
         print(f"❌ Teams мэдээлэл илгээхэд алдаа: {e}")
         return False
-
-def get_ai_response(thread_id, message_content, conv_id=None, customer_email=None, retry_count=0):
-    """OpenAI Assistant-ээс хариулт авах"""
-    try:
-        # Хэрэглэгчийн мессежийг thread руу нэмэх
-        client.beta.threads.messages.create(
-            thread_id=thread_id,
-            role="user",
-            content=message_content
-        )
-
-        # Assistant run үүсгэх
-        run = client.beta.threads.runs.create(
-            thread_id=thread_id, 
-            assistant_id=ASSISTANT_ID
-        )
-
-        # Run дуусахыг хүлээх
-        max_wait = 30
-        wait_count = 0
-        while wait_count < max_wait:
-            run_status = client.beta.threads.runs.retrieve(
-                thread_id=thread_id, 
-                run_id=run.id
-            )
-            
-            if run_status.status == "completed":
-                break
-            elif run_status.status in ["failed", "cancelled", "expired"]:
-                error_msg = "Уучлаарай, алдаа гарлаа. Дахин оролдоно уу."
-                
-                # Teams мэдээлэх (хэрэв эхний удаагийн алдаа бол)
-                if retry_count == 0 and conv_id:
-                    send_teams_notification(
-                        conv_id, 
-                        message_content, 
-                        customer_email, 
-                        f"AI run статус алдаа: {run_status.status}",
-                        f"OpenAI run ID: {run.id}, Status: {run_status.status}"
-                    )
-                
-                return error_msg
-                
-            time.sleep(1)
-            wait_count += 1
-
-        if wait_count >= max_wait:
-            timeout_msg = "Хариулахад хэт удаж байна. Дахин оролдоно уу."
-            
-            # Teams мэдээлэх (хэрэв эхний удаагийн timeout бол)
-            if retry_count == 0 and conv_id:
-                send_teams_notification(
-                    conv_id, 
-                    message_content, 
-                    customer_email, 
-                    "AI хариулт timeout (30 секунд)",
-                    f"OpenAI run ID: {run.id}, Thread ID: {thread_id}"
-                )
-            
-            return timeout_msg
-
-        # Assistant-ийн хариультыг авах
-        messages = client.beta.threads.messages.list(thread_id=thread_id)
-        
-        for msg in messages.data:
-            if msg.role == "assistant":
-                reply = ""
-                for content_block in msg.content:
-                    if hasattr(content_block, 'text'):
-                        reply += content_block.text.value
-                return reply
-
-        # Хариулт олдохгүй
-        no_response_msg = "Хариулт олдсонгүй. Дахин оролдоно уу."
-        
-        # Teams мэдээлэх (хэрэв эхний удаагийн алдаа бол)
-        if retry_count == 0 and conv_id:
-            send_teams_notification(
-                conv_id, 
-                message_content, 
-                customer_email, 
-                "AI хариулт олдсонгүй",
-                f"Thread ID: {thread_id}, Messages хайлтад хариулт байхгүй"
-            )
-        
-        return no_response_msg
-        
-    except Exception as e:
-        print(f"AI хариулт авахад алдаа: {e}")
-        error_msg = "Уучлаарай, алдаа гарлаа. Дахин оролдоно уу."
-        
-        # Teams мэдээлэх (хэрэв эхний удаагийн алдаа бол)
-        if retry_count == 0 and conv_id:
-            send_teams_notification(
-                conv_id, 
-                message_content, 
-                customer_email, 
-                "AI системийн алдаа (Exception)",
-                f"Python exception: {str(e)}, Thread ID: {thread_id}"
-            )
-        
-        return error_msg
 
 @app.route("/verify", methods=["GET"])
 def verify_email():
@@ -835,19 +739,17 @@ def webhook():
         print(f"🤖 Баталгаажсан хэрэглэгч ({verified_email}) - AI chatbot ажиллуулж байна")
         
         # ========== RAG СИСТЕМЭЭР ДОКУМЕНТ ХАЙЛТ ==========
-        print("📚 Документ хайлт хийж байна...")
+        print("📚 Бүх асуултанд RAG системээр эхлээд хайж байна...")
         
         ai_response = None
         used_rag = False
-        
-        # Бүх асуултанд RAG системийг эхлээд туршиж үзэх
-        print("📖 RAG системээр хариулт хайж байна...")
+        rag_attempted = True
         
         # RAG-аар хариулт хайх
         rag_result = search_docs_with_rag(message_content)
         
         # RAG хариултын чанарыг шалгах
-        if rag_result["answer"] and rag_result.get("confidence", 0) >= 0.3:
+        if rag_result["answer"] and rag_result.get("confidence", 0) >= 0.25:  # 25%-аас дээш итгэлтэй бол
             # RAG хариултыг форматлах
             ai_response = rag_result["answer"]
             
@@ -867,7 +769,7 @@ def webhook():
         
         # ========== STANDARD AI ASSISTANT (хэрэв RAG ашиглаагүй бол) ==========
         if not used_rag:
-            print("🤖 Standard AI Assistant ашиглаж байна...")
+            print("🤖 RAG хариулт олдсонгүй - AI Assistant-аар дүгнэж дэмжлэгийн багт мэдэгдэх...")
             
             # Thread мэдээлэл авах
             conv = get_conversation(conv_id)
@@ -886,80 +788,50 @@ def webhook():
             else:
                 print(f"✅ Одоо байгаа thread ашиглаж байна: {thread_id}")
 
-            # AI хариулт авах (retry logic-той)
-            print("🤖 AI хариулт авч байна...")
-            
-            retry_count = 0
-            
-            while retry_count <= MAX_AI_RETRIES:
-                ai_response = get_ai_response(thread_id, message_content, conv_id, verified_email, retry_count)
+            # AI-аар асуудлыг дүгнэх (документээс олдохгүй асуудал)
+            print("🔍 AI-аар асуудлыг дүгнэж байна...")
+            try:
+                analysis = analyze_undocumented_issue(thread_id, message_content, verified_email, rag_result)
+                print(f"✅ Асуудлын дүгнэлт бэлэн: {analysis[:100]}...")
                 
-                # Хэрэв алдаатай хариулт биш бол амжилттай
-                if not any(error_phrase in ai_response for error_phrase in [
-                    "алдаа гарлаа", "хэт удаж байна", "олдсонгүй"
-                ]):
-                    break
-                    
-                retry_count += 1
-                if retry_count <= MAX_AI_RETRIES:
-                    print(f"🔄 AI дахин оролдож байна... ({retry_count}/{MAX_AI_RETRIES})")
-                    time.sleep(2)  # 2 секунд хүлээх
-            
-            # Хэрэв бүх оролдлого бүтэлгүйтвэл ажилтанд хуваарилах
-            if retry_count > MAX_AI_RETRIES:
-                print("❌ AI-ийн бүх оролдлого бүтэлгүйтэв - ажилтанд хуваарилж байна")
-                
-                send_teams_notification(
-                    conv_id, 
-                    message_content, 
-                    verified_email, 
-                    f"AI {MAX_AI_RETRIES + 1} удаа дараалан алдаа гаргалаа",
-                    f"Thread ID: {thread_id}, Бүх retry оролдлого бүтэлгүйтэв"
+                # Дэмжлэгийн багт мэдэгдэх
+                escalation_success = send_teams_notification(
+                    conv_id,
+                    message_content,
+                    verified_email,
+                    "Документээс олдохгүй асуудал - AI дүгнэлт",
+                    analysis
                 )
                 
+                if escalation_success:
+                    ai_response = (
+                        "🔍 Таны асуултыг документаас хайсан боловч тохирох хариулт олдсонгүй.\n\n"
+                        "🤖 AI системээр дүгнэж, дэмжлэгийн багт дамжуулсан.\n\n"
+                        "👥 Мэргэжилтэн удахгүй тантай холбогдож, асуудлыг шийдэх болно.\n\n"
+                        "🕐 Түр хүлээнэ үү..."
+                    )
+                else:
+                    ai_response = (
+                        "🔍 Таны асуултыг документаас хайсан боловч тохирох хариулт олдсонгүй.\n\n"
+                        "⚠️ Дэмжлэгийн багт мэдэгдэхэд алдаа гарлаа.\n\n"
+                        "📞 Шууд холбогдоно уу эсвэл дахин оролдоно уу."
+                    )
+                
+                print("✅ Документээс олдохгүй асуудлыг дэмжлэгийн багт мэдэгдлээ")
+                
+            except Exception as e:
+                print(f"❌ Асуудал дүгнэхэд алдаа: {e}")
                 ai_response = (
-                    "🚨 Уучлаарай, техникийн асуудал гарлаа.\n\n"
-                    "Би таны асуултыг техникийн багт дамжуулаа. Удахгүй асуудлыг шийдэж, танд хариулт өгөх болно.\n\n"
-                    "🕐 Түр хүлээнэ үү..."
+                    "🔍 Таны асуултыг документаас хайсан боловч тохирох хариулт олдсонгүй.\n\n"
+                    "⚠️ Системийн алдаа гарлаа.\n\n"
+                    "📞 Шууд дэмжлэгийн багтай холбогдоно уу."
                 )
         
         # ========== ХАРИУЛТ ИЛГЭЭХ ==========
         # Chatwoot руу илгээх
-        response_type = "RAG" if used_rag else "AI Assistant"
+        response_type = "RAG" if used_rag else "AI дүгнэлт + Дэмжлэгийн баг"
         send_to_chatwoot(conv_id, ai_response)
         print(f"✅ {response_type} хариулт илгээлээ: {ai_response[:50]}...")
-        
-        # ========== TEAMS МЭДЭЭЛЭЛ (зөвхөн Standard AI-д) ==========
-        # RAG ашигласан бол Teams мэдээлэх шаардлагагүй
-        if not used_rag and retry_count <= MAX_AI_RETRIES:  # Зөвхөн амжилттай AI хариулт үед
-            print("🔍 Teams-д илгээх хэрэгтэй эсэхийг шалгаж байна...")
-            
-            # Шинэ асуудал мөн эсэхийг шалгах
-            should_escalate, reason = should_escalate_to_teams(thread_id, message_content)
-            
-            if should_escalate:
-                print(f"✅ {reason} - Teams-д илгээх")
-                try:
-                    # AI-ээр асуудлыг дүгнэх
-                    analysis = analyze_customer_issue(thread_id, message_content, verified_email)
-                    print(f"✅ Дүгнэлт бэлэн: {analysis[:100]}...")
-                    
-                    # Teams-ээр мэдээлэх
-                    send_teams_notification(
-                        conv_id,
-                        message_content,
-                        verified_email,
-                        f"Хэрэглэгчийн асуудлын дүгнэлт - {reason}",
-                        analysis
-                    )
-                    print("✅ Асуудлын дүгнэлт ажилтанд илгээлээ")
-                    
-                except Exception as e:
-                    print(f"❌ Асуудал дүгнэхэд алдаа: {e}")
-            else:
-                print(f"⏭️ {reason} - Teams-д илгээхгүй")
-        elif used_rag:
-            print("📚 RAG ашигласан учир Teams мэдээлэх шаардлагагүй")
         
         return jsonify({"status": "success"}), 200
 
@@ -1024,7 +896,7 @@ def docs_search():
             "answer": result["answer"],
             "sources": result["sources"],
             "confidence": result.get("confidence", 0),
-            "has_answer": result["answer"] is not None and result.get("confidence", 0) >= 0.3,
+            "has_answer": result["answer"] is not None and result.get("confidence", 0) >= 0.25,
             "timestamp": datetime.utcnow().isoformat()
         }
         
@@ -1115,101 +987,6 @@ def rebuild_docs():
     except Exception as e:
         logger.error(f"Vector store дахин бүтээхэд алдаа: {str(e)}")
         return jsonify({"error": f"Алдаа: {str(e)}"}), 500
-
-# def escalate_to_human(conv_id, customer_message, customer_email=None):
-#     """Хэрэглэгчийн асуудлыг AI-ээр дүгнэж Teams-ээр ажилтанд хуваарилах (ашиглагддаггүй)"""
-#     try:
-#         print("🔍 Хэрэглэгчийн асуудлыг дүгнэж байна...")
-        
-#         # Энэ функц ашиглагддаггүй учир простой дүгнэлт хийх
-#         simple_analysis = f"""АСУУДЛЫН ТӨРӨЛ: Тодорхойгүй
-# ЯАРАЛТАЙ БАЙДАЛ: Дунд
-# АСУУДЛЫН ТОВЧ ТАЙЛБАР: {customer_message}
-# ШААРДЛАГАТАЙ АРГА ХЭМЖЭЭ: Ажилтны анхаарал шаардлагатай
-# ХҮЛЭЭГДЭЖ БУЙ ХАРИУЛТ: Хэрэглэгчийн асуудлыг шийдэх"""
-        
-#         print(f"✅ Энгийн дүгнэлт бэлэн: {simple_analysis[:100]}...")
-        
-#         # Teams-ээр мэдээлэх
-#         success = send_teams_notification(
-#             conv_id,
-#             customer_message,
-#             customer_email,
-#             "Хэрэглэгчийн асуудлын дүгнэлт",
-#             simple_analysis
-#         )
-        
-#         if success:
-#             print("✅ Асуудлыг амжилттай ажилтанд хуваарилав")
-#             return "👋 Би таны асуудлыг дүгнэж, ажилтанд дамжуулаа. Удахгүй ажилтан тантай холбогдоно.\n\n🕐 Түр хүлээнэ үү..."
-#         else:
-#             print("❌ Teams мэдээлэл илгээхэд алдаа")
-#             return "Уучлаарай, таны асуудлыг ажилтанд дамжуулахад алдаа гарлаа. Дахин оролдоно уу."
-            
-#     except Exception as e:
-#         print(f"❌ Escalation алдаа: {e}")
-#         return "Уучлаарай, алдаа гарлаа. Дахин оролдоно уу."
-
-def should_escalate_to_teams(thread_id, current_message):
-    """Тухайн асуудлыг Teams-д илгээх хэрэгтэй эсэхийг шийдэх"""
-    try:
-        # OpenAI thread-с сүүлийн 20 мессежийг авах
-        messages = client.beta.threads.messages.list(thread_id=thread_id, limit=20)
-        
-        # Хэрэглэгчийн мессежүүдийг цуглуулах
-        user_messages = []
-        for msg in reversed(messages.data):
-            if msg.role == "user":
-                content = ""
-                for content_block in msg.content:
-                    if hasattr(content_block, 'text'):
-                        content += content_block.text.value
-                if content.strip():
-                    user_messages.append(content.strip())
-        
-        # Хэрэв анхны мессеж бол Teams-д илгээх
-        if len(user_messages) <= 1:
-            return True, "Анхны асуулт"
-        
-        # AI-аар шинэ асуудал мөн эсэхийг шалгах
-        system_msg = (
-            "Та бол чат дүн шинжилгээний мэргэжилтэн. "
-            "Хэрэглэгчийн сүүлийн мессеж нь шинэ асуудал мөн эсэхийг тодорхойлно уу."
-        )
-        
-        user_msg = f'''
-Хэрэглэгчийн өмнөх мессежүүд:
-{chr(10).join(user_messages[:-1])}
-
-Одоогийн мессеж: "{current_message}"
-
-Дараах аль нэгээр хариулна уу:
-- "ШИН_АСУУДАЛ" - хэрэв одоогийн мессеж шинэ төрлийн асуудал бол
-- "ҮРГЭЛЖЛЭЛ" - хэрэв өмнөх асуудлын үргэлжлэл, тодруулга бол
-- "ДАХИН_АСУУЛТ" - хэрэв ижил асуудлыг дахин асууж байгаа бол
-'''
-        
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg}
-            ],
-            max_tokens=50,
-            temperature=0.1
-        )
-        
-        analysis_result = response.choices[0].message.content.strip()
-        
-        if "ШИН_АСУУДАЛ" in analysis_result:
-            return True, "Шинэ асуудал илрэв"
-        else:
-            return False, "Өмнөх асуудлын үргэлжлэл"
-            
-    except Exception as e:
-        print(f"❌ Escalation шийдэх алдаа: {e}")
-        # Алдаа гарвал анхны мессеж гэж үзэх
-        return True, "Алдаа - анхны мессеж гэж үзэв"
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
