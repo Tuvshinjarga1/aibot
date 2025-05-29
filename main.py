@@ -130,8 +130,8 @@ def crawl_docs(base_url: str) -> list:
 def chunk_documents(documents: list) -> list:
     """Документуудыг жижиг хэсэгт хуваах"""
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,  # Reduced chunk size to fit token limit
-        chunk_overlap=50,  # Reduced overlap
+        chunk_size=1000,  # Increased chunk size for better content
+        chunk_overlap=100,  # Increased overlap for better context
         separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
     )
     
@@ -230,14 +230,14 @@ try:
     vectorstore = load_vectorstore()
     retriever = vectorstore.as_retriever(
         search_type="similarity",
-        search_kwargs={"k": 3}
+        search_kwargs={"k": 5}
     )
     
     qa_chain = RetrievalQA.from_chain_type(
         llm=LC_OpenAI(
             openai_api_key=OPENAI_API_KEY, 
             temperature=0.1,
-            max_tokens=500,
+            max_tokens=800,
             model_name="gpt-3.5-turbo-instruct"
         ),
         chain_type="stuff",
@@ -425,6 +425,49 @@ def analyze_customer_issue(thread_id, current_message, customer_email=None):
 ТОВЧ ТАЙЛБАР: {current_message[:100]}
 ШААРДЛАГАТАЙ АРГА ХЭМЖЭЭ: Ажилтны анхаарал шаардлагатай"""
 
+def clean_ai_response(response: str) -> str:
+    """AI хариултыг цэвэрлэх - JSON форматыг арилгах"""
+    try:
+        # JSON pattern олох
+        import json
+        
+        # Хэрэв JSON объект байвал арилгах
+        if response.strip().startswith('{') and response.strip().endswith('}'):
+            try:
+                # JSON parse хийж үзэх
+                json_data = json.loads(response)
+                
+                # Хэрэв email, issue, details гэх мэт key-үүд байвал энгийн текст болгох
+                if isinstance(json_data, dict):
+                    if "email" in json_data or "issue" in json_data:
+                        # JSON-ээс хэрэглэгчид ойлгомжтой мэдээлэл гаргах
+                        clean_text = "Таны хүсэлтийг техникийн дэмжлэгийн багт дамжуулаа. "
+                        clean_text += "Удахгүй асуудлыг шийдэж, танд хариулт өгөх болно."
+                        return clean_text
+            except json.JSONDecodeError:
+                pass
+        
+        # JSON pattern-уудыг арилгах
+        import re
+        
+        # {"email": "...", "issue": "...", "details": "..."} гэх мэт pattern арилгах
+        json_pattern = r'\{[^}]*"email"[^}]*\}'
+        response = re.sub(json_pattern, '', response)
+        
+        # Илүүдэл мөр, хоосон зай арилгах
+        response = re.sub(r'\n\s*\n', '\n', response)
+        response = response.strip()
+        
+        # Хэрэв хариулт хэт богино болсон бол default мессеж
+        if len(response) < 20:
+            return "Таны хүсэлтийг хүлээн авлаа. Удахгүй хариулт өгөх болно."
+        
+        return response
+        
+    except Exception as e:
+        print(f"❌ AI хариулт цэвэрлэхэд алдаа: {e}")
+        return response  # Алдаа гарвал анхны хариултыг буцаах
+
 def send_teams_notification(conv_id, customer_message, customer_email=None, escalation_reason="Хэрэглэгчийн асуудал", ai_analysis=None):
     """Microsoft Teams руу техникийн асуудлын талаар ажилтанд мэдээлэх"""
     if not TEAMS_WEBHOOK_URL:
@@ -589,7 +632,10 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
                 for content_block in msg.content:
                     if hasattr(content_block, 'text'):
                         reply += content_block.text.value
-                return reply
+                
+                # AI хариултыг цэвэрлэх - JSON форматыг арилгах
+                cleaned_reply = clean_ai_response(reply)
+                return cleaned_reply
 
         # Хариулт олдохгүй
         no_response_msg = "Хариулт олдсонгүй. Дахин оролдоно уу."
@@ -927,6 +973,29 @@ def webhook():
         send_to_chatwoot(conv_id, final_response)
         print(f"✅ {response_type} хариулт илгээлээ: {final_response[:50]}...")
         
+        # Teams мэдээлэх логик - зөвхөн шинэ асуудал эсвэл техникийн асуудал үед
+        try:
+            # Хэрэв хоёулаа амжилттай бол Teams-д мэдээлэх хэрэггүй
+            if not (rag_response["success"] and ai_success):
+                # Escalation шаардлагатай эсэхийг шалгах
+                should_escalate, escalation_reason = should_escalate_to_teams(thread_id, message_content)
+                
+                if should_escalate:
+                    # AI дүгнэлт хийх
+                    ai_analysis = analyze_customer_issue(thread_id, message_content, verified_email)
+                    
+                    # Teams мэдээлэх
+                    send_teams_notification(
+                        conv_id, 
+                        message_content, 
+                        verified_email, 
+                        escalation_reason,
+                        ai_analysis
+                    )
+                    print(f"📢 Teams мэдээлэл илгээлээ: {escalation_reason}")
+        except Exception as e:
+            print(f"❌ Teams мэдээлэх алдаа: {e}")
+        
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
@@ -1019,14 +1088,14 @@ def rebuild_docs():
         # QA chain дахин үүсгэх
         retriever = vectorstore.as_retriever(
             search_type="similarity",
-            search_kwargs={"k": 3}
+            search_kwargs={"k": 5}
         )
         
         qa_chain = RetrievalQA.from_chain_type(
             llm=LC_OpenAI(
                 openai_api_key=OPENAI_API_KEY, 
                 temperature=0.1,
-                max_tokens=500,
+                max_tokens=800,
                 model_name="gpt-3.5-turbo-instruct"
             ),
             chain_type="stuff",
