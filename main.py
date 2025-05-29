@@ -224,17 +224,6 @@ def search_docs_with_rag(question: str) -> dict:
             "sources": []
         }
 
-def is_docs_question(message: str) -> bool:
-    """Мессеж нь документын асуулт мөн эсэхийг шалгах"""
-    docs_keywords = [
-        "документ", "заавар", "manual", "гайд", "guide", "хэрхэн", "tutorial",
-        "API", "docs", "documentation", "хичээл", "зөвлөгөө", "жишээ",
-        "код", "code", "function", "method", "класс", "class", "модуль"
-    ]
-    
-    message_lower = message.lower()
-    return any(keyword in message_lower for keyword in docs_keywords)
-
 # Initialize RAG system
 try:
     vectorstore = load_vectorstore()
@@ -794,31 +783,33 @@ def webhook():
         ai_response = None
         used_rag = False
         
-        # Хэрэв документын асуулт бол RAG ашиглах
-        if is_docs_question(message_content):
-            print("📖 Документын асуулт илэрлээ - RAG системээр хариулж байна")
+        # Бүх асуултыг эхлээд RAG-аар хайх
+        print("📖 RAG системээр хариулт хайж байна...")
+        
+        # RAG-аар хариулт хайх
+        rag_result = search_docs_with_rag(message_content)
+        
+        # RAG хариултыг шалгах - алдаа эсвэл хоосон биш хариулт
+        if (rag_result["answer"] and 
+            "алдаа гарлаа" not in rag_result["answer"].lower() and 
+            "документ хайлтанд алдаа" not in rag_result["answer"].lower() and
+            len(rag_result["answer"].strip()) > 20):  # Хангалттай урт хариулт
             
-            # RAG-аар хариулт хайх
-            rag_result = search_docs_with_rag(message_content)
+            # RAG хариултыг форматлах
+            ai_response = rag_result["answer"]
             
-            if rag_result["answer"] and "алдаа гарлаа" not in rag_result["answer"]:
-                # RAG хариултыг форматлах
-                ai_response = rag_result["answer"]
-                
-                # Source links нэмэх
-                if rag_result["sources"]:
-                    ai_response += "\n\n📚 **Холбогдох документууд:**\n"
-                    for i, source in enumerate(rag_result["sources"], 1):
-                        title = source.get("title", "Документ")
-                        url = source.get("url", "")
-                        ai_response += f"{i}. [{title}]({url})\n"
-                
-                used_rag = True
-                print(f"✅ RAG хариулт олдлоо: {ai_response[:100]}...")
-            else:
-                print("❌ RAG хариулт олдсонгүй - AI Assistant-д шилжүүлж байна")
+            # Source links нэмэх
+            if rag_result["sources"]:
+                ai_response += "\n\n📚 **Холбогдох документууд:**\n"
+                for i, source in enumerate(rag_result["sources"], 1):
+                    title = source.get("title", "Документ")
+                    url = source.get("url", "")
+                    ai_response += f"{i}. [{title}]({url})\n"
+            
+            used_rag = True
+            print(f"✅ RAG хариулт олдлоо: {ai_response[:100]}...")
         else:
-            print("💬 Ерөнхий асуулт - AI Assistant-р хариулна")
+            print("❌ RAG-аас хангалттай хариулт олдсонгүй - AI Assistant-д шилжүүлж байна")
         
         # ========== STANDARD AI ASSISTANT (хэрэв RAG ашиглаагүй бол) ==========
         if not used_rag:
