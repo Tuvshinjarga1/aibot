@@ -10,7 +10,6 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
-import asyncio
 
 # RAG системийн импорт нэмэх
 from bs4 import BeautifulSoup
@@ -1122,7 +1121,7 @@ def webhook():
                 message_content, 
                 verified_email, 
                 "RAG болон AI Assistant хоёулаа бүтэлгүйтэв",
-                None,
+                f"Thread ID: {thread_id}, Хоёр систем алдаа гаргалаа",
                 thread_id
             )
             
@@ -1381,239 +1380,321 @@ def should_escalate_to_teams(thread_id, current_message):
         except:
             return True, "Системийн алдаа - анхаарал шаардлагатай"
 
-def send_typing_indicator(conv_id):
-    """Chatwoot дээр typing indicator харуулах"""
+def create_inbox(name, channel_type="api", webhook_url=None):
+    """Chatwoot дээр шинэ inbox үүсгэх"""
     try:
-        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/toggle_typing_status"
-        headers = {"api_access_token": CHATWOOT_API_KEY}
-        payload = {"typing_status": "on"}
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/inboxes"
         
-        response = requests.post(url, json=payload, headers=headers)
-        if response.status_code == 200:
-            print("✅ Typing indicator асаалаа")
-            return True
+        # API channel үүсгэх
+        if channel_type == "api":
+            payload = {
+                "name": name,
+                "channel": {
+                    "type": "api",
+                    "webhook_url": webhook_url or f"{VERIFICATION_URL_BASE}/webhook"
+                }
+            }
+        # Website channel үүсгэх
+        elif channel_type == "website":
+            payload = {
+                "name": name,
+                "channel": {
+                    "type": "web_widget",
+                    "website_url": "https://example.com",
+                    "welcome_title": "Сайн байна уу!",
+                    "welcome_tagline": "Бидэнтэй холбогдоно уу",
+                    "widget_color": "#1f93ff"
+                }
+            }
         else:
-            print(f"⚠️ Typing indicator асаахад алдаа: {response.status_code}")
-            return False
+            raise ValueError(f"Дэмжигдээгүй channel төрөл: {channel_type}")
+        
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        resp = requests.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        
+        inbox_data = resp.json()
+        inbox_id = inbox_data["id"]
+        print(f"✅ Шинэ inbox үүсгэлээ: {name} (ID: {inbox_id})")
+        
+        return inbox_data
+        
     except Exception as e:
-        print(f"❌ Typing indicator алдаа: {e}")
+        print(f"❌ Inbox үүсгэхэд алдаа: {e}")
+        return None
+
+def get_inboxes():
+    """Бүх inbox-уудын жагсаалт авах"""
+    try:
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/inboxes"
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        resp = requests.get(url, headers=headers)
+        resp.raise_for_status()
+        
+        inboxes = resp.json()["payload"]
+        print(f"📋 Нийт {len(inboxes)} inbox олдлоо")
+        
+        for inbox in inboxes:
+            print(f"  - {inbox['name']} (ID: {inbox['id']}, Type: {inbox['channel_type']})")
+        
+        return inboxes
+        
+    except Exception as e:
+        print(f"❌ Inbox жагсаалт авахад алдаа: {e}")
+        return []
+
+def update_inbox(inbox_id, name=None, settings=None):
+    """Inbox тохиргоо шинэчлэх"""
+    try:
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/inboxes/{inbox_id}"
+        
+        payload = {}
+        if name:
+            payload["name"] = name
+        if settings:
+            payload.update(settings)
+        
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        resp = requests.patch(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        
+        print(f"✅ Inbox {inbox_id} шинэчлэгдлээ")
+        return resp.json()
+        
+    except Exception as e:
+        print(f"❌ Inbox шинэчлэхэд алдаа: {e}")
+        return None
+
+def delete_inbox(inbox_id):
+    """Inbox устгах"""
+    try:
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/inboxes/{inbox_id}"
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        resp = requests.delete(url, headers=headers)
+        resp.raise_for_status()
+        
+        print(f"✅ Inbox {inbox_id} устгагдлаа")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Inbox устгахад алдаа: {e}")
         return False
 
-def stop_typing_indicator(conv_id):
-    """Chatwoot дээр typing indicator унтраах"""
+def setup_default_inbox():
+    """Анхдагч inbox тохируулах"""
     try:
-        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/toggle_typing_status"
-        headers = {"api_access_token": CHATWOOT_API_KEY}
-        payload = {"typing_status": "off"}
+        # Одоо байгаа inbox-уудыг шалгах
+        existing_inboxes = get_inboxes()
         
-        response = requests.post(url, json=payload, headers=headers)
-        if response.status_code == 200:
-            print("✅ Typing indicator унтраалаа")
-            return True
+        # "AI Chatbot" нэртэй inbox байгаа эсэхийг шалгах
+        ai_inbox = None
+        for inbox in existing_inboxes:
+            if "AI Chatbot" in inbox.get("name", ""):
+                ai_inbox = inbox
+                break
+        
+        if ai_inbox:
+            print(f"✅ AI Chatbot inbox аль хэдийн байна: {ai_inbox['name']} (ID: {ai_inbox['id']})")
+            return ai_inbox
+        
+        # Шинэ AI Chatbot inbox үүсгэх
+        print("🔧 AI Chatbot inbox үүсгэж байна...")
+        new_inbox = create_inbox(
+            name="AI Chatbot - Автомат хариулт",
+            channel_type="api",
+            webhook_url=f"{VERIFICATION_URL_BASE}/webhook"
+        )
+        
+        if new_inbox:
+            print(f"🎉 AI Chatbot inbox амжилттай үүсгэгдлээ!")
+            return new_inbox
         else:
-            print(f"⚠️ Typing indicator унтраахад алдаа: {response.status_code}")
-            return False
+            print("❌ AI Chatbot inbox үүсгэж чадсангүй")
+            return None
+            
     except Exception as e:
-        print(f"❌ Typing indicator алдаа: {e}")
-        return False
+        print(f"❌ Default inbox тохируулахад алдаа: {e}")
+        return None
 
-def delayed_bot_response(conv_id, message_content, contact_id, verified_email, delay_seconds=3):
-    """Хэдэн секундын дараа бот хариулах функц"""
-    def process_and_respond():
+# =============== INBOX УДИРДЛАГЫН ENDPOINTS ===============
+
+@app.route("/inboxes", methods=["GET"])
+def list_inboxes():
+    """Бүх inbox-уудын жагсаалт"""
+    try:
+        inboxes = get_inboxes()
+        return jsonify({
+            "status": "success",
+            "inboxes": inboxes,
+            "count": len(inboxes),
+            "timestamp": datetime.utcnow().isoformat()
+        }), 200
+    except Exception as e:
+        return jsonify({"error": f"Алдаа: {str(e)}"}), 500
+
+@app.route("/inboxes", methods=["POST"])
+def create_new_inbox():
+    """Шинэ inbox үүсгэх"""
+    try:
+        data = request.json
+        if not data:
+            return jsonify({"error": "JSON өгөгдөл байхгүй"}), 400
+        
+        name = data.get("name")
+        if not name:
+            return jsonify({"error": "Inbox нэр шаардлагатай"}), 400
+        
+        channel_type = data.get("channel_type", "api")
+        webhook_url = data.get("webhook_url")
+        
+        inbox = create_inbox(name, channel_type, webhook_url)
+        
+        if inbox:
+            return jsonify({
+                "status": "success",
+                "message": "Inbox амжилттай үүсгэгдлээ",
+                "inbox": inbox,
+                "timestamp": datetime.utcnow().isoformat()
+            }), 201
+        else:
+            return jsonify({"error": "Inbox үүсгэж чадсангүй"}), 500
+            
+    except Exception as e:
+        return jsonify({"error": f"Алдаа: {str(e)}"}), 500
+
+@app.route("/inboxes/<int:inbox_id>", methods=["PATCH"])
+def update_inbox_endpoint(inbox_id):
+    """Inbox шинэчлэх"""
+    try:
+        data = request.json
+        if not data:
+            return jsonify({"error": "JSON өгөгдөл байхгүй"}), 400
+        
+        name = data.get("name")
+        settings = data.get("settings", {})
+        
+        result = update_inbox(inbox_id, name, settings)
+        
+        if result:
+            return jsonify({
+                "status": "success",
+                "message": "Inbox амжилттай шинэчлэгдлээ",
+                "inbox": result,
+                "timestamp": datetime.utcnow().isoformat()
+            }), 200
+        else:
+            return jsonify({"error": "Inbox шинэчлэж чадсангүй"}), 500
+            
+    except Exception as e:
+        return jsonify({"error": f"Алдаа: {str(e)}"}), 500
+
+@app.route("/inboxes/<int:inbox_id>", methods=["DELETE"])
+def delete_inbox_endpoint(inbox_id):
+    """Inbox устгах"""
+    try:
+        success = delete_inbox(inbox_id)
+        
+        if success:
+            return jsonify({
+                "status": "success",
+                "message": f"Inbox {inbox_id} амжилттай устгагдлаа",
+                "timestamp": datetime.utcnow().isoformat()
+            }), 200
+        else:
+            return jsonify({"error": "Inbox устгаж чадсангүй"}), 500
+            
+    except Exception as e:
+        return jsonify({"error": f"Алдаа: {str(e)}"}), 500
+
+@app.route("/setup-inbox", methods=["POST"])
+def setup_inbox_endpoint():
+    """Анхдагч AI Chatbot inbox тохируулах"""
+    try:
+        inbox = setup_default_inbox()
+        
+        if inbox:
+            return jsonify({
+                "status": "success",
+                "message": "AI Chatbot inbox тохируулагдлаа",
+                "inbox": inbox,
+                "timestamp": datetime.utcnow().isoformat()
+            }), 200
+        else:
+            return jsonify({"error": "Inbox тохируулж чадсангүй"}), 500
+            
+    except Exception as e:
+        return jsonify({"error": f"Алдаа: {str(e)}"}), 500
+
+@app.route("/test-inbox", methods=["GET"])
+def test_inbox():
+    """Inbox функцуудыг тест хийх"""
+    try:
+        result = {
+            "status": "success",
+            "tests": {},
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        # 1. Inbox жагсаалт тест
         try:
-            print(f"⏰ {delay_seconds} секунд хүлээж байна...")
-            
-            # Typing indicator асаах
-            send_typing_indicator(conv_id)
-            
-            # Тодорхой хугацаа хүлээх
-            time.sleep(delay_seconds)
-            
-            # Thread мэдээлэл бэлтгэх
-            conv = get_conversation(conv_id)
-            conv_attrs = conv.get("custom_attributes", {})
-            thread_key = f"openai_thread_{contact_id}"
-            thread_id = conv_attrs.get(thread_key)
-            
-            # Thread шинээр үүсгэх хэрэгтэй эсэхийг шалгах
-            if not thread_id:
-                print("🧵 Шинэ thread үүсгэж байна...")
-                thread = client.beta.threads.create()
-                thread_id = thread.id
-                update_conversation(conv_id, {thread_key: thread_id})
-                print(f"✅ Thread үүсгэлээ: {thread_id}")
-            else:
-                print(f"✅ Одоо байгаа thread ашиглаж байна: {thread_id}")
-            
-            # Хариултуудыг хадгалах хувьсагчид
-            rag_response = {"answer": None, "sources": [], "success": False}
-            ai_response_text = None
-            ai_success = False
-            
-            # RAG функц
-            def run_rag():
-                nonlocal rag_response
-                try:
-                    print("📚 RAG системээр хайж байна...")
-                    result = search_docs_with_rag(message_content)
-                    if result["answer"] and "алдаа гарлаа" not in result["answer"]:
-                        rag_response = {
-                            "answer": result["answer"],
-                            "sources": result["sources"],
-                            "success": True
-                        }
-                        print(f"✅ RAG амжилттай: {result['answer'][:50]}...")
-                    else:
-                        print("❌ RAG хариулт олдсонгүй")
-                except Exception as e:
-                    print(f"❌ RAG алдаа: {e}")
-            
-            # AI Assistant функц
-            def run_ai_assistant():
-                nonlocal ai_response_text, ai_success
-                try:
-                    print("🤖 AI Assistant ажиллаж байна...")
-                    retry_count = 0
-                    while retry_count <= MAX_AI_RETRIES:
-                        response = get_ai_response(thread_id, message_content, conv_id, verified_email, retry_count)
-                        
-                        # Хэрэв алдаатай хариулт биш бол амжилттай
-                        if not any(error_phrase in response for error_phrase in [
-                            "алдаа гарлаа", "хэт удаж байна", "олдсонгүй"
-                        ]):
-                            ai_response_text = response
-                            ai_success = True
-                            print(f"✅ AI Assistant амжилттай: {response[:50]}...")
-                            break
-                            
-                        retry_count += 1
-                        if retry_count <= MAX_AI_RETRIES:
-                            print(f"🔄 AI дахин оролдож байна... ({retry_count}/{MAX_AI_RETRIES})")
-                            time.sleep(2)
-                    
-                    if not ai_success:
-                        print("❌ AI Assistant бүх оролдлого бүтэлгүйтэв")
-                        
-                except Exception as e:
-                    print(f"❌ AI Assistant алдаа: {e}")
-            
-            # Хоёр системийг зэрэг ажиллуулах
-            rag_thread = threading.Thread(target=run_rag)
-            ai_thread = threading.Thread(target=run_ai_assistant)
-            
-            # Thread эхлүүлэх
-            rag_thread.start()
-            ai_thread.start()
-            
-            # Хоёуланг нь дуусахыг хүлээх (максимум 45 секунд)
-            rag_thread.join(timeout=30)
-            ai_thread.join(timeout=30)
-            
-            print(f"🔍 Үр дүн: RAG={rag_response['success']}, AI={ai_success}")
-            
-            # ========== ХАРИУЛТУУДЫГ НЭГТГЭХ ==========
-            final_response = ""
-            response_type = ""
-            
-            if rag_response["success"] and ai_success:
-                # Хоёулаа амжилттай бол нэгтгэх
-                print("🎯 Хоёр систем амжилттай - хариултуудыг нэгтгэж байна")
-                
-                final_response = f"📚 **Документаас олсон мэдээлэл:**\n{rag_response['answer']}\n\n"
-                final_response += f"🤖 **AI туслахын нэмэлт зөвлөгөө:**\n{ai_response_text}"
-                
-                # RAG sources нэмэх
-                if rag_response["sources"]:
-                    final_response += "\n\n📖 **Холбогдох документууд:**\n"
-                    for i, source in enumerate(rag_response["sources"], 1):
-                        title = source.get("title", "Документ")
-                        url = source.get("url", "")
-                        final_response += f"{i}. [{title}]({url})\n"
-                
-                response_type = "RAG + AI Assistant"
-                
-            elif rag_response["success"]:
-                # Зөвхөн RAG амжилттай
-                print("📚 Зөвхөн RAG амжилттай")
-                
-                final_response = rag_response["answer"]
-                
-                # RAG sources нэмэх
-                if rag_response["sources"]:
-                    final_response += "\n\n📚 **Холбогдох документууд:**\n"
-                    for i, source in enumerate(rag_response["sources"], 1):
-                        title = source.get("title", "Документ")
-                        url = source.get("url", "")
-                        final_response += f"{i}. [{title}]({url})\n"
-                
-                response_type = "RAG"
-                
-            elif ai_success:
-                # Зөвхөн AI Assistant амжилттай
-                print("🤖 Зөвхөн AI Assistant амжилттай")
-                final_response = ai_response_text
-                response_type = "AI Assistant"
-                
-            else:
-                # Хоёулаа бүтэлгүйтэв
-                print("❌ Хоёр систем бүтэлгүйтэв - ажилтанд хуваарилж байна")
-                
-                send_teams_notification(
-                    conv_id, 
-                    message_content, 
-                    verified_email, 
-                    "RAG болон AI Assistant хоёулаа бүтэлгүйтэв",
-                    None,
-                    thread_id
-                )
-                
-                final_response = (
-                    "🚨 Уучлаарай, техникийн асуудал гарлаа.\n\n"
-                    "Би таны асуултыг техникийн багт дамжуулаа. Удахгүй асуудлыг шийдэж, танд хариулт өгөх болно.\n\n"
-                    "🕐 Түр хүлээнэ үү..."
-                )
-                response_type = "Error - Escalated"
-            
-            # Typing indicator унтраах
-            stop_typing_indicator(conv_id)
-            
-            # ========== ХАРИУЛТ ИЛГЭЭХ ==========
-            # Chatwoot руу илгээх
-            send_to_chatwoot(conv_id, final_response)
-            print(f"✅ {response_type} хариулт илгээлээ: {final_response[:50]}...")
-            
-            # Teams мэдээлэх логик - зөвхөн шинэ асуудал эсвэл техникийн асуудал үед
-            try:
-                # Хэрэв хоёулаа амжилттай бол Teams-д мэдээлэх хэрэггүй
-                if not (rag_response["success"] and ai_success):
-                    # Escalation шаардлагатай эсэхийг шалгах
-                    should_escalate, escalation_reason = should_escalate_to_teams(thread_id, message_content)
-                    
-                    if should_escalate:
-                        # Teams мэдээлэх - GPT дүгнэлттэй
-                        send_teams_notification(
-                            conv_id, 
-                            message_content, 
-                            verified_email, 
-                            escalation_reason,
-                            None,  # ai_analysis-г функц дотор үүсгэнэ
-                            thread_id
-                        )
-                        print(f"📢 Teams GPT дүгнэлттэй мэдээлэл илгээлээ: {escalation_reason}")
-            except Exception as e:
-                print(f"❌ Teams мэдээлэх алдаа: {e}")
-                
+            inboxes = get_inboxes()
+            result["tests"]["list_inboxes"] = {
+                "status": "success",
+                "count": len(inboxes),
+                "inboxes": [{"id": i["id"], "name": i["name"], "type": i["channel_type"]} for i in inboxes]
+            }
         except Exception as e:
-            print(f"💥 Delayed response алдаа: {e}")
-            # Алдаа гарвал typing indicator унтраах
-            stop_typing_indicator(conv_id)
-            # Алдааны мессеж илгээх
-            send_to_chatwoot(conv_id, "🚨 Уучлаарай, техникийн алдаа гарлаа. Дахин оролдоно уу.")
-    
-    # Background thread-д ажиллуулах
-    response_thread = threading.Thread(target=process_and_respond)
-    response_thread.daemon = True
-    response_thread.start()
+            result["tests"]["list_inboxes"] = {
+                "status": "error",
+                "error": str(e)
+            }
+        
+        # 2. API тохиргоо шалгах
+        try:
+            test_url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/inboxes"
+            headers = {"api_access_token": CHATWOOT_API_KEY}
+            resp = requests.get(test_url, headers=headers, timeout=10)
+            
+            result["tests"]["api_connection"] = {
+                "status": "success" if resp.status_code == 200 else "error",
+                "status_code": resp.status_code,
+                "chatwoot_url": CHATWOOT_BASE_URL,
+                "account_id": ACCOUNT_ID,
+                "api_key_length": len(CHATWOOT_API_KEY) if CHATWOOT_API_KEY else 0
+            }
+        except Exception as e:
+            result["tests"]["api_connection"] = {
+                "status": "error",
+                "error": str(e)
+            }
+        
+        # 3. Environment variables шалгах
+        result["tests"]["environment"] = {
+            "chatwoot_api_key": "✅ Тохируулсан" if CHATWOOT_API_KEY else "❌ Байхгүй",
+            "account_id": "✅ Тохируулсан" if ACCOUNT_ID else "❌ Байхгүй",
+            "chatwoot_base_url": CHATWOOT_BASE_URL,
+            "verification_url_base": VERIFICATION_URL_BASE
+        }
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }), 500
 
 if __name__ == "__main__":
+    # Системийг эхлүүлэхэд анхдагч inbox тохируулах
+    print("🚀 Систем эхэлж байна...")
+    
+    # Default inbox тохируулах
+    try:
+        print("📋 Inbox тохиргоо шалгаж байна...")
+        setup_default_inbox()
+    except Exception as e:
+        print(f"⚠️ Inbox тохируулахад алдаа: {e}")
+    
+    print("✅ Систем бэлэн боллоо!")
     app.run(debug=True, port=5000)

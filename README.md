@@ -61,6 +61,59 @@ Chatwoot дээр webhook URL тохируулах:
 http://your-domain.com/webhook
 ```
 
+## 📬 Inbox удирдлага
+
+Систем нь автоматаар "AI Chatbot" inbox үүсгэнэ. Гараар удирдахын тулд дараах API-уудыг ашиглана уу:
+
+### Inbox жагсаалт авах
+
+```bash
+GET /inboxes
+```
+
+### Шинэ inbox үүсгэх
+
+```bash
+POST /inboxes
+Content-Type: application/json
+
+{
+  "name": "Миний Chatbot",
+  "channel_type": "api",
+  "webhook_url": "http://your-domain.com/webhook"
+}
+```
+
+### Inbox шинэчлэх
+
+```bash
+PATCH /inboxes/{inbox_id}
+Content-Type: application/json
+
+{
+  "name": "Шинэ нэр",
+  "settings": {}
+}
+```
+
+### Inbox устгах
+
+```bash
+DELETE /inboxes/{inbox_id}
+```
+
+### Анхдагч inbox тохируулах
+
+```bash
+POST /setup-inbox
+```
+
+### Inbox тест хийх
+
+```bash
+GET /test-inbox
+```
+
 ## 🎯 Ашиглах заавар
 
 ### Хэрэглэгчийн хувьд:
@@ -79,6 +132,7 @@ http://your-domain.com/webhook
 - Хэрэглэгч бүр өөрийн OpenAI thread-тэй
 - Имэйл баталгаажуулах токен 24 цагийн дараа дуусна
 - Chatwoot conversation дээр `email_verified` болон `verified_contact_{contact_id}` хадгалагдана
+- Систем эхлэхэд автоматаар "AI Chatbot" inbox үүсгэнэ
 
 ## 🔒 Аюулгүй байдал
 
@@ -95,6 +149,20 @@ http://your-domain.com/webhook
 2. Environment variables зөв тохируулсан эсэхийг шалгах
 3. Gmail App Password зөв ашиглаж байгаа эсэхийг шалгах
 4. Chatwoot webhook URL зөв тохируулсан эсэхийг шалгах
+5. Inbox тохиргоог `/test-inbox` endpoint-ээр шалгах
+
+### Inbox асуудал шийдэх:
+
+```bash
+# Inbox тохиргоо шалгах
+curl http://localhost:5000/test-inbox
+
+# Inbox жагсаалт авах
+curl http://localhost:5000/inboxes
+
+# Анхдагч inbox тохируулах
+curl -X POST http://localhost:5000/setup-inbox
+```
 
 ## 📞 Дэмжлэг
 
@@ -317,216 +385,3 @@ Chatwoot → Flask Webhook → Email Check → Question Type
 ---
 
 **Анхаарах:** Энэ систем production орчинд ашиглахын өмнө бүх тохиргоог сайтар шалгана уу.
-
-# Chatwoot AI Bot with Delayed Response
-
-Энэ бол Chatwoot-той холбогдсон AI туслах бот юм. RAG (Retrieval-Augmented Generation) систем болон OpenAI Assistant ашиглан хэрэглэгчдэд хариулт өгдөг.
-
-## 🚀 Шинэ функцууд
-
-### ⏰ Delayed Response (Хойшлуулсан хариулт)
-
-- Бот хариулахаас өмнө тодорхой хугацаа хүлээнэ
-- Chatwoot inbox дээр мессеж харагдсаны дараа хариулна
-- Typing indicator харуулж хэрэглэгчид мэдэгдэнэ
-
-### 👤 Contact Management
-
-- Хэрэглэгч имэйл өгөх үед автоматаар contact бүртгэнэ
-- Баталгаажуулсан хэрэглэгчдийг тусгайлан тэмдэглэнэ
-
-### 🤖 GPT-powered Escalation
-
-- Teams руу асуудал явуулахдаа GPT дүгнэлт хийлгэнэ
-- Илүү ухаалаг escalation логик
-
-## 📋 Орчны хувьсагчид
-
-```bash
-# Үндсэн тохиргоо
-OPENAI_API_KEY=your_openai_api_key
-ASSISTANT_ID=your_assistant_id
-CHATWOOT_API_KEY=your_chatwoot_api_key
-ACCOUNT_ID=your_account_id
-
-# Bot хариулах хугацаа (секундээр)
-BOT_RESPONSE_DELAY=3
-
-# RAG систем
-DOCS_BASE_URL=https://docs.cloud.mn
-
-# Email тохиргоо
-SENDER_EMAIL=your_email@gmail.com
-SENDER_PASSWORD=your_app_password
-SMTP_SERVER=smtp.gmail.com
-SMTP_PORT=587
-
-# Teams webhook
-TEAMS_WEBHOOK_URL=your_teams_webhook_url
-
-# JWT тохиргоо
-JWT_SECRET=your_secret_key
-VERIFICATION_URL_BASE=http://localhost:5000
-```
-
-## 🛠️ Суулгах заавар
-
-1. **Dependencies суулгах:**
-
-```bash
-pip install flask openai requests beautifulsoup4 python-dotenv langchain langchain-community langchain-openai faiss-cpu PyJWT
-```
-
-2. **.env файл үүсгэх:**
-
-```bash
-cp .env.example .env
-# .env файлд өөрийн мэдээллийг оруулах
-```
-
-3. **Ажиллуулах:**
-
-```bash
-python main.py
-```
-
-## 📡 API Endpoints
-
-### 1. Webhook
-
-```
-POST /webhook
-```
-
-Chatwoot-аас ирэх мессежүүдийг боловсруулна.
-
-### 2. Имэйл баталгаажуулалт
-
-```
-GET /verify?token=<verification_token>
-```
-
-Хэрэглэгчийн имэйл хаягийг баталгаажуулна.
-
-### 3. Тохиргоо
-
-```
-GET /config
-POST /config
-```
-
-**GET /config** - Одоогийн тохиргоог харах:
-
-```json
-{
-  "bot_response_delay": 3,
-  "max_ai_retries": 2,
-  "rag_system_enabled": true,
-  "teams_webhook_enabled": true,
-  "email_enabled": true,
-  "docs_base_url": "https://docs.cloud.mn",
-  "vector_store_exists": true
-}
-```
-
-**POST /config** - Тохиргоо өөрчлөх:
-
-```json
-{
-  "bot_response_delay": 5
-}
-```
-
-### 4. Документ хайлт
-
-```
-POST /docs-search
-```
-
-```json
-{
-  "question": "CloudMN-ийн талаар асуулт"
-}
-```
-
-### 5. Health Check
-
-```
-GET /health
-```
-
-### 6. Vector Store дахин бүтээх
-
-```
-POST /rebuild-docs
-```
-
-## ⚙️ Тохиргооны параметрүүд
-
-### BOT_RESPONSE_DELAY
-
-- **Утга:** 1-30 секунд
-- **Default:** 3 секунд
-- **Тайлбар:** Бот хариулахаас өмнө хэдэн секунд хүлээх
-
-### MAX_AI_RETRIES
-
-- **Утга:** 0-5
-- **Default:** 2
-- **Тайлбар:** AI алдаа гарвал хэдэн удаа дахин оролдох
-
-## 🔄 Ажиллах процесс
-
-1. **Мессеж ирэх:** Chatwoot webhook дуудагдана
-2. **Баталгаажуулалт:** Хэрэглэгчийн имэйл баталгаажсан эсэхийг шалгана
-3. **Delayed Response:** Тохируулсан хугацаа хүлээнэ
-4. **Typing Indicator:** Хэрэглэгчид "typing..." харуулна
-5. **AI Processing:** RAG болон OpenAI Assistant зэрэг ажиллана
-6. **Response:** Хариултыг Chatwoot руу илгээнэ
-7. **Escalation:** Шаардлагатай бол Teams руу мэдээлнэ
-
-## 🎯 Давуу талууд
-
-- ✅ Chatwoot inbox дээр мессеж харагдсаны дараа хариулна
-- ✅ Typing indicator-ээр хэрэглэгчид мэдэгдэнэ
-- ✅ Contact автоматаар бүртгэгдэнэ
-- ✅ GPT дүгнэлттэй Teams мэдээлэл
-- ✅ Тохируулж болох хариулах хугацаа
-- ✅ Илүү сайн хэрэглэгчийн туршлага
-
-## 🔧 Тест хийх
-
-### Тохиргоо шалгах:
-
-```bash
-curl http://localhost:5000/config
-```
-
-### Bot response delay өөрчлөх:
-
-```bash
-curl -X POST http://localhost:5000/config \
-  -H "Content-Type: application/json" \
-  -d '{"bot_response_delay": 5}'
-```
-
-### Health check:
-
-```bash
-curl http://localhost:5000/health
-```
-
-## 📝 Тэмдэглэл
-
-- Typing indicator нь Chatwoot API-аас хамаарна
-- Delayed response нь background thread-д ажиллана
-- Contact бүртгэл нь имэйл баталгаажуулалттай холбоотой
-- Teams мэдээлэл нь GPT дүгнэлттэй илгээгдэнэ
-
-## 🐛 Алдаа засварлалт
-
-Хэрэв typing indicator ажиллахгүй бол:
-
-1. Chatwoot API key-г шалгана уу
-2. Account ID зөв эсэхийг шалгана уу
-3. Chatwoot дээр conversation идэвхтэй эсэхийг шалгана уу
