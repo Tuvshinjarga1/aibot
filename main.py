@@ -767,7 +767,7 @@ def verify_email():
         email = payload['email']
         
         # Contact үүсгэх эсвэл шинэчлэх
-        verified_contact_id = create_or_update_contact(email)
+        verified_contact_id = create_or_update_contact(email, email.split("@")[0])  # Имэйлийн эхний хэсгийг нэр болгох
         if verified_contact_id and verified_contact_id != contact_id:
             # Хэрэв шинэ contact үүссэн бол conversation-д оноох
             assign_contact_to_conversation(conv_id, verified_contact_id)
@@ -896,17 +896,57 @@ def webhook():
         
         print(f"📝 Conv ID: {conv_id}, Message: '{message_content}'")
         
-        # Contact ID олох
+        # Contact ID олох - илүү найдвартай аргаар
         contact_id = None
+        customer_name = "Тодорхойгүй"
+        
+        # Эхлээд webhook data-аас contact мэдээлэл хайх
         if "sender" in data and data["sender"]:
             contact_id = data["sender"].get("id")
+            customer_name = data["sender"].get("name", "Тодорхойгүй")
+            print(f"👤 Webhook-ээс Contact ID: {contact_id}, Name: {customer_name}")
         
+        # Хэрэв webhook дээр contact байхгүй бол conversation-аас хайх
         if not contact_id:
-            print("❌ Contact ID олдсонгүй")
-            send_to_chatwoot(conv_id, "Алдаа: Хэрэглэгчийн мэдээлэл олдсонгүй.")
-            return jsonify({"status": "error - no contact"}), 400
+            print("🔍 Webhook дээр contact байхгүй, conversation-аас хайж байна...")
+            try:
+                conv_data = get_conversation(conv_id)
+                if "meta" in conv_data and "sender" in conv_data["meta"]:
+                    sender_meta = conv_data["meta"]["sender"]
+                    contact_id = sender_meta.get("id")
+                    customer_name = sender_meta.get("name", "Тодорхойгүй")
+                    print(f"👤 Conversation-аас Contact ID: {contact_id}, Name: {customer_name}")
+            except Exception as e:
+                print(f"❌ Conversation мэдээлэл авахад алдаа: {e}")
+        
+        # Хэрэв contact_id олдохгүй бол anonymous user гэж үзэх
+        if not contact_id:
+            print("⚠️ Contact ID олдсонгүй - Anonymous user гэж үзэж байна")
+            
+            # Anonymous user-д зориулсан хариулт
+            send_to_chatwoot(conv_id, 
+                "👋 Сайн байна уу! Та бидэнтэй анх удаа харилцаж байна.\n\n"
+                "🔐 AI туслахтай бүрэн харилцахын тулд эхлээд имэйл хаягаа баталгаажуулна уу.\n\n"
+                "📧 Зөв имэйл хаягаа бичээд илгээнэ үү.\n"
+                "Жишээ: example@gmail.com\n\n"
+                "✨ Баталгаажуулсны дараа та манай AI туслахтай бүрэн харилцах боломжтой болно!")
+            
+            # Teams-д мэдээлэх (anonymous user)
+            try:
+                send_teams_notification(
+                    conv_id, 
+                    message_content, 
+                    None,  # customer_email
+                    "Anonymous user - Contact ID олдсонгүй",
+                    f"Webhook data дээр contact мэдээлэл байхгүй байна. Message: {message_content}",
+                    None  # thread_id
+                )
+            except Exception as e:
+                print(f"❌ Anonymous user Teams мэдээлэх алдаа: {e}")
+            
+            return jsonify({"status": "handled - anonymous user"}), 200
 
-        print(f"👤 Contact ID: {contact_id}")
+        print(f"✅ Contact ID тогтоогдлоо: {contact_id}")
 
         # ========== БАТАЛГААЖУУЛАЛТ ШАЛГАХ ==========
         print("🔍 Баталгаажуулалт шалгаж байна...")
@@ -954,11 +994,13 @@ def webhook():
                 print(f"📧 Зөв имэйл: {message_content}")
                 
                 # Contact үүсгэх эсвэл шинэчлэх
-                new_contact_id = create_or_update_contact(message_content)
+                new_contact_id = create_or_update_contact(message_content, customer_name)
                 if new_contact_id:
                     # Conversation-д contact оноох
                     assign_contact_to_conversation(conv_id, new_contact_id)
                     print(f"✅ Contact {new_contact_id} бүртгэж, conversation-д оноолоо")
+                    # contact_id-г шинэчлэх
+                    contact_id = new_contact_id
                 
                 # Баталгаажуулах токен үүсгэх
                 token = generate_verification_token(message_content, conv_id, contact_id)
