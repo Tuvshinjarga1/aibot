@@ -10,6 +10,7 @@ CHATWOOT_BASE_URL=https://app.chatwoot.com
 # Chatwoot API Channel тохиргоо
 INBOX_ID=123  # API channel-ийн inbox ID
 DEFAULT_SOURCE_ID_PREFIX=api_user_  # Source ID prefix (сонголт)
+FILTER_BY_INBOX=true  # Зөвхөн тодорхой inbox-аас мессеж боловсруулах (true/false)
 
 # Email тохиргоо (Gmail)
 SENDER_EMAIL=your-email@gmail.com

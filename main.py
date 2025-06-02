@@ -40,10 +40,6 @@ CHATWOOT_API_KEY  = os.environ["CHATWOOT_API_KEY"]
 ACCOUNT_ID        = os.environ["ACCOUNT_ID"]
 CHATWOOT_BASE_URL = "https://app.chatwoot.com"
 
-# Chatwoot API Channel тохиргоо
-INBOX_ID = os.environ.get("INBOX_ID")  # API channel-ийн inbox ID
-DEFAULT_SOURCE_ID_PREFIX = os.environ.get("DEFAULT_SOURCE_ID_PREFIX", "api_user_")  # Source ID prefix
-
 # RAG системийн тохиргоо
 DOCS_BASE_URL = os.environ.get("DOCS_BASE_URL", "https://docs.cloud.mn")
 VECTOR_STORE_PATH = "docs_faiss_index"
@@ -356,71 +352,6 @@ def send_to_chatwoot(conv_id, text):
     payload = {"content": text, "message_type": "outgoing"}
     r = requests.post(url, json=payload, headers=headers)
     r.raise_for_status()
-
-def create_user_message_in_chatwoot(conv_id, text, contact_id):
-    """Хэрэглэгчийн мессежийг Chatwoot дээр харагдуулах"""
-    try:
-        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/messages"
-        headers = {"api_access_token": CHATWOOT_API_KEY}
-        payload = {
-            "content": text,
-            "message_type": "incoming",
-            "sender_type": "Contact",
-            "sender_id": contact_id
-        }
-        r = requests.post(url, json=payload, headers=headers)
-        r.raise_for_status()
-        print(f"✅ Хэрэглэгчийн мессеж Chatwoot дээр үүсгэлээ: {text[:50]}...")
-        return True
-    except Exception as e:
-        print(f"❌ Хэрэглэгчийн мессеж үүсгэхэд алдаа: {e}")
-        return False
-
-def ensure_user_message_visible(conv_id, message_content, contact_id, data):
-    """Хэрэглэгчийн мессеж Chatwoot дээр харагдаж байгаа эсэхийг шалгаж, шаардлагатай бол үүсгэх"""
-    try:
-        # Хэрэв энэ нь API channel бол хэрэглэгчийн мессеж харагдахгүй байж болно
-        conversation = data.get("conversation", {})
-        inbox_type = conversation.get("inbox", {}).get("channel_type", "")
-        
-        print(f"📋 Inbox type: {inbox_type}")
-        
-        # API channel эсвэл бусад channel-д хэрэглэгчийн мессеж харагдуулах
-        if inbox_type in ["Channel::Api", "api"] or not inbox_type:
-            print("🔧 API channel илрэв - хэрэглэгчийн мессежийг харагдуулж байна...")
-            success = create_user_message_in_chatwoot(conv_id, message_content, contact_id)
-            if success:
-                print("✅ Хэрэглэгчийн мессеж амжилттай харагдуулав")
-            else:
-                print("❌ Хэрэглэгчийн мессеж харагдуулахад алдаа")
-        else:
-            print(f"ℹ️ {inbox_type} channel - хэрэглэгчийн мессеж аль хэдийн харагдаж байна")
-            
-    except Exception as e:
-        print(f"⚠️ Хэрэглэгчийн мессеж шалгахад алдаа: {e}")
-
-def create_conversation_with_source_id(inbox_id, contact_id, source_id, initial_message):
-    """Source ID ашиглан шинэ conversation үүсгэх"""
-    try:
-        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
-        headers = {"api_access_token": CHATWOOT_API_KEY}
-        payload = {
-            "source_id": source_id,
-            "inbox_id": inbox_id,
-            "contact_id": contact_id,
-            "status": "open",
-            "message": {
-                "content": initial_message
-            }
-        }
-        r = requests.post(url, json=payload, headers=headers)
-        r.raise_for_status()
-        result = r.json()
-        print(f"✅ Шинэ conversation үүсгэлээ: {result.get('id')}")
-        return result
-    except Exception as e:
-        print(f"❌ Conversation үүсгэхэд алдаа: {e}")
-        return None
 
 def analyze_customer_issue(thread_id, current_message, customer_email=None):
     """AI ашиглан хэрэглэгчийн бүх чат түүхийг дүгнэж, comprehensive мэдээлэл өгөх"""
@@ -823,15 +754,6 @@ def webhook():
 
         print(f"👤 Contact ID: {contact_id}")
 
-        # ========== ХЭРЭГЛЭГЧИЙН МЕССЕЖИЙГ CHATWOOT ДЭЭР ХАРАГДУУЛАХ ==========
-        # Хэрэв хэрэглэгчийн мессеж Chatwoot дээр харагдахгүй байгаа бол шинээр үүсгэх
-        try:
-            # Хэрэглэгчийн мессежийг Chatwoot дээр харагдуулах
-            ensure_user_message_visible(conv_id, message_content, contact_id, data)
-        except Exception as e:
-            print(f"⚠️ Хэрэглэгчийн мессеж үүсгэхэд алдаа: {e}")
-            # Энэ алдаа нь системийн үндсэн ажиллагаанд саад болохгүй
-
         # ========== БАТАЛГААЖУУЛАЛТ ШАЛГАХ ==========
         print("🔍 Баталгаажуулалт шалгаж байна...")
         
@@ -1115,37 +1037,6 @@ def docs_search():
         logger.error(f"RAG endpoint алдаа: {str(e)}")
         return jsonify({"error": f"Системийн алдаа: {str(e)}"}), 500
 
-@app.route("/test-user-message", methods=["POST"])
-def test_user_message():
-    """Хэрэглэгчийн мессеж үүсгэх тест"""
-    try:
-        data = request.json
-        if not data:
-            return jsonify({"error": "JSON өгөгдөл байхгүй"}), 400
-            
-        conv_id = data.get("conv_id")
-        message = data.get("message", "Тест мессеж")
-        contact_id = data.get("contact_id")
-        
-        if not conv_id or not contact_id:
-            return jsonify({"error": "conv_id болон contact_id шаардлагатай"}), 400
-        
-        # Хэрэглэгчийн мессеж үүсгэх
-        success = create_user_message_in_chatwoot(conv_id, message, contact_id)
-        
-        if success:
-            return jsonify({
-                "status": "success",
-                "message": "Хэрэглэгчийн мессеж амжилттай үүсгэлээ",
-                "conv_id": conv_id,
-                "content": message
-            }), 200
-        else:
-            return jsonify({"error": "Мессеж үүсгэхэд алдаа гарлаа"}), 500
-            
-    except Exception as e:
-        return jsonify({"error": f"Алдаа: {str(e)}"}), 500
-
 @app.route("/health", methods=["GET"])
 def health():
     """Системийн health check"""
@@ -1157,8 +1048,7 @@ def health():
             "openai_client": client is not None,
             "teams_webhook": TEAMS_WEBHOOK_URL is not None,
             "email_smtp": SENDER_EMAIL is not None and SENDER_PASSWORD is not None,
-            "chatwoot_api": CHATWOOT_API_KEY is not None and ACCOUNT_ID is not None,
-            "inbox_id": INBOX_ID is not None
+            "chatwoot_api": CHATWOOT_API_KEY is not None and ACCOUNT_ID is not None
         }
     }
     

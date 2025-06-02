@@ -35,6 +35,13 @@ pip install -r requirements.txt
 1. Chatwoot дээр API channel үүсгэх
 2. Inbox ID-г `.env` файлд `INBOX_ID` болгон оруулах
 3. Webhook URL тохируулах: `http://your-domain.com/webhook`
+4. Inbox шүүлт тохируулах: `FILTER_BY_INBOX=true`
+
+**Inbox шүүлтийн тохиргоо:**
+
+- `FILTER_BY_INBOX=true` - Зөвхөн `INBOX_ID`-тай тохирох inbox-аас мессеж боловсруулах
+- `FILTER_BY_INBOX=false` - Бүх inbox-аас мессеж боловсруулах
+- Хэрэв `INBOX_ID` тохируулаагүй бол бүх inbox-аас мессеж боловсруулна
 
 ### Gmail тохиргоо
 
@@ -67,6 +74,7 @@ python main.py
 - `POST /webhook` - Chatwoot webhook handler
 - `GET /verify` - Имэйл баталгаажуулалт
 - `GET /health` - Системийн health check
+- `GET /inboxes` - Бүх inbox-уудын жагсаалт авах
 
 ### Тест endpoints
 
@@ -168,6 +176,7 @@ Chatwoot SaaS ашиглаж байгаа бол:
 - `POST /webhook` - Chatwoot webhook handler
 - `GET /verify` - Имэйл баталгаажуулалт
 - `GET /health` - Системийн health check
+- `GET /inboxes` - Бүх inbox-уудын жагсаалт авах
 
 ### RAG системийн endpoints
 
