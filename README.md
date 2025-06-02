@@ -61,59 +61,6 @@ Chatwoot дээр webhook URL тохируулах:
 http://your-domain.com/webhook
 ```
 
-## 📬 Inbox удирдлага
-
-Систем нь автоматаар "AI Chatbot" inbox үүсгэнэ. Гараар удирдахын тулд дараах API-уудыг ашиглана уу:
-
-### Inbox жагсаалт авах
-
-```bash
-GET /inboxes
-```
-
-### Шинэ inbox үүсгэх
-
-```bash
-POST /inboxes
-Content-Type: application/json
-
-{
-  "name": "Миний Chatbot",
-  "channel_type": "api",
-  "webhook_url": "http://your-domain.com/webhook"
-}
-```
-
-### Inbox шинэчлэх
-
-```bash
-PATCH /inboxes/{inbox_id}
-Content-Type: application/json
-
-{
-  "name": "Шинэ нэр",
-  "settings": {}
-}
-```
-
-### Inbox устгах
-
-```bash
-DELETE /inboxes/{inbox_id}
-```
-
-### Анхдагч inbox тохируулах
-
-```bash
-POST /setup-inbox
-```
-
-### Inbox тест хийх
-
-```bash
-GET /test-inbox
-```
-
 ## 🎯 Ашиглах заавар
 
 ### Хэрэглэгчийн хувьд:
@@ -132,7 +79,6 @@ GET /test-inbox
 - Хэрэглэгч бүр өөрийн OpenAI thread-тэй
 - Имэйл баталгаажуулах токен 24 цагийн дараа дуусна
 - Chatwoot conversation дээр `email_verified` болон `verified_contact_{contact_id}` хадгалагдана
-- Систем эхлэхэд автоматаар "AI Chatbot" inbox үүсгэнэ
 
 ## 🔒 Аюулгүй байдал
 
@@ -149,20 +95,6 @@ GET /test-inbox
 2. Environment variables зөв тохируулсан эсэхийг шалгах
 3. Gmail App Password зөв ашиглаж байгаа эсэхийг шалгах
 4. Chatwoot webhook URL зөв тохируулсан эсэхийг шалгах
-5. Inbox тохиргоог `/test-inbox` endpoint-ээр шалгах
-
-### Inbox асуудал шийдэх:
-
-```bash
-# Inbox тохиргоо шалгах
-curl http://localhost:5000/test-inbox
-
-# Inbox жагсаалт авах
-curl http://localhost:5000/inboxes
-
-# Анхдагч inbox тохируулах
-curl -X POST http://localhost:5000/setup-inbox
-```
 
 ## 📞 Дэмжлэг
 
