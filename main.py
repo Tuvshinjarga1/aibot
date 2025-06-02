@@ -468,8 +468,76 @@ def clean_ai_response(response: str) -> str:
         print(f"❌ AI хариулт цэвэрлэхэд алдаа: {e}")
         return response  # Алдаа гарвал анхны хариултыг буцаах
 
-def send_teams_notification(conv_id, customer_message, customer_email=None, escalation_reason="Хэрэглэгчийн асуудал", ai_analysis=None):
-    """Microsoft Teams руу техникийн асуудлын талаар ажилтанд мэдээлэх"""
+def create_or_update_contact(email, name=None, phone=None):
+    """Contact үүсгэх эсвэл шинэчлэх"""
+    try:
+        # Эхлээд имэйлээр contact хайх
+        search_url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/search"
+        search_params = {"q": email}
+        search_resp = requests.get(search_url, params=search_params, headers={"api_access_token": CHATWOOT_API_KEY})
+        
+        if search_resp.status_code == 200:
+            search_results = search_resp.json()
+            if search_results.get("payload") and len(search_results["payload"]) > 0:
+                # Contact олдсон бол шинэчлэх
+                existing_contact = search_results["payload"][0]
+                contact_id = existing_contact["id"]
+                print(f"📝 Одоо байгаа contact олдлоо: {contact_id}")
+                
+                # Custom attributes шинэчлэх
+                update_contact(contact_id, {
+                    "email_verified": "1",
+                    "verified_email": email,
+                    "verification_date": datetime.utcnow().isoformat(),
+                    "contact_type": "verified_customer"
+                })
+                
+                return contact_id
+        
+        # Contact олдохгүй бол шинээр үүсгэх
+        create_url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts"
+        contact_data = {
+            "name": name or email.split("@")[0],  # Имэйлийн эхний хэсгийг нэр болгох
+            "email": email,
+            "custom_attributes": {
+                "email_verified": "1",
+                "verified_email": email,
+                "verification_date": datetime.utcnow().isoformat(),
+                "contact_type": "verified_customer"
+            }
+        }
+        
+        if phone:
+            contact_data["phone_number"] = phone
+            
+        create_resp = requests.post(create_url, json=contact_data, headers={"api_access_token": CHATWOOT_API_KEY})
+        create_resp.raise_for_status()
+        
+        new_contact = create_resp.json()
+        contact_id = new_contact["payload"]["contact"]["id"]
+        print(f"✅ Шинэ contact үүсгэлээ: {contact_id}")
+        
+        return contact_id
+        
+    except Exception as e:
+        print(f"❌ Contact үүсгэх/шинэчлэх алдаа: {e}")
+        return None
+
+def assign_contact_to_conversation(conv_id, contact_id):
+    """Conversation-д contact оноох"""
+    try:
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}"
+        payload = {"contact_id": contact_id}
+        resp = requests.patch(url, json=payload, headers={"api_access_token": CHATWOOT_API_KEY})
+        resp.raise_for_status()
+        print(f"✅ Contact {contact_id}-г conversation {conv_id}-д оноолоо")
+        return True
+    except Exception as e:
+        print(f"❌ Contact оноох алдаа: {e}")
+        return False
+
+def send_teams_notification(conv_id, customer_message, customer_email=None, escalation_reason="Хэрэглэгчийн асуудал", ai_analysis=None, thread_id=None):
+    """Microsoft Teams руу техникийн асуудлын талаар ажилтанд мэдээлэх - GPT дүгнэлттэй"""
     if not TEAMS_WEBHOOK_URL:
         print("⚠️ Teams webhook URL тохируулаагүй байна")
         return False
@@ -478,10 +546,15 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
         # Chatwoot conversation URL
         conv_url = f"{CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conv_id}"
         
+        # Хэрэв AI дүгнэлт байхгүй бол үүсгэх
+        if not ai_analysis and thread_id:
+            print("🤖 GPT дүгнэлт үүсгэж байна...")
+            ai_analysis = analyze_customer_issue(thread_id, customer_message, customer_email)
+        
         # AI асуудлын дэлгэрэнгүй мэдээлэл бэлтгэх
         error_summary = escalation_reason
         if ai_analysis:
-            error_summary += f"\n\nДэлгэрэнгүй анализ: {ai_analysis}"
+            error_summary += f"\n\nGPT дүгнэлт:\n{ai_analysis}"
         
         # Teams message format
         teams_message = {
@@ -495,14 +568,14 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
                     "body": [
                         {
                             "type": "TextBlock",
-                            "text": "📋 Хэрэглэгчийн асуудлын дүгнэлт",
+                            "text": "🚨 Хэрэглэгчийн асуудлын мэдээлэл",
                             "weight": "Bolder",
                             "size": "Medium",
                             "color": "Attention"
                         },
                         {
                             "type": "TextBlock",
-                            "text": "AI систем хэрэглэгчийн асуудлыг дүгнэж, ажилтны анхаарал татахуйц асуудал гэж үзэж байна.",
+                            "text": "AI систем хэрэглэгчийн асуудлыг дүгнэж, ажилтны анхаарал шаардлагатай гэж үзэж байна.",
                             "wrap": True,
                             "color": "Default"
                         },
@@ -520,6 +593,10 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
                                 {
                                     "title": "Хугацаа:",
                                     "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                },
+                                {
+                                    "title": "Шалтгаан:",
+                                    "value": escalation_reason
                                 }
                             ]
                         }
@@ -532,7 +609,7 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
         if ai_analysis:
             teams_message["attachments"][0]["content"]["body"].append({
                 "type": "TextBlock",
-                "text": "🤖 AI Дүгнэлт:",
+                "text": "🤖 GPT Дүгнэлт:",
                 "weight": "Bolder",
                 "size": "Medium",
                 "spacing": "Large"
@@ -556,7 +633,7 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
         
         response = requests.post(TEAMS_WEBHOOK_URL, json=teams_message)
         response.raise_for_status()
-        print(f"✅ Teams техникийн мэдээлэл илгээлээ: {escalation_reason}")
+        print(f"✅ Teams GPT дүгнэлттэй мэдээлэл илгээлээ: {escalation_reason}")
         return True
         
     except Exception as e:
@@ -600,7 +677,8 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
                         message_content, 
                         customer_email, 
                         f"AI run статус алдаа: {run_status.status}",
-                        f"OpenAI run ID: {run.id}, Status: {run_status.status}"
+                        f"OpenAI run ID: {run.id}, Status: {run_status.status}",
+                        thread_id
                     )
                 
                 return error_msg
@@ -618,7 +696,8 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
                     message_content, 
                     customer_email, 
                     "AI хариулт timeout (30 секунд)",
-                    f"OpenAI run ID: {run.id}, Thread ID: {thread_id}"
+                    f"OpenAI run ID: {run.id}, Thread ID: {thread_id}",
+                    thread_id
                 )
             
             return timeout_msg
@@ -647,7 +726,8 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
                 message_content, 
                 customer_email, 
                 "AI хариулт олдсонгүй",
-                f"Thread ID: {thread_id}, Messages хайлтад хариулт байхгүй"
+                f"Thread ID: {thread_id}, Messages хайлтад хариулт байхгүй",
+                thread_id
             )
         
         return no_response_msg
@@ -663,7 +743,8 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
                 message_content, 
                 customer_email, 
                 "AI системийн алдаа (Exception)",
-                f"Python exception: {str(e)}, Thread ID: {thread_id}"
+                f"Python exception: {str(e)}, Thread ID: {thread_id}",
+                thread_id
             )
         
         return error_msg
@@ -685,12 +766,20 @@ def verify_email():
         contact_id = payload['contact_id']
         email = payload['email']
         
-        # Contact дээр баталгаажуулалтын мэдээлэл хадгалах
-        update_contact(contact_id, {
-            "email_verified": "1",  # Checkbox type-д string "true" ашиглах
-            "verified_email": email,
-            "verification_date": datetime.utcnow().isoformat()
-        })
+        # Contact үүсгэх эсвэл шинэчлэх
+        verified_contact_id = create_or_update_contact(email)
+        if verified_contact_id and verified_contact_id != contact_id:
+            # Хэрэв шинэ contact үүссэн бол conversation-д оноох
+            assign_contact_to_conversation(conv_id, verified_contact_id)
+            print(f"✅ Шинэ contact {verified_contact_id} conversation-д оноолоо")
+        else:
+            # Одоо байгаа contact-ийг шинэчлэх
+            update_contact(contact_id, {
+                "email_verified": "1",
+                "verified_email": email,
+                "verification_date": datetime.utcnow().isoformat(),
+                "contact_type": "verified_customer"
+            })
         
         # Conversation дээр thread мэдээлэл хадгалах (thread нь conversation specific)
         thread_key = f"openai_thread_{contact_id}"
@@ -699,7 +788,10 @@ def verify_email():
         })
         
         # Баталгаажуулах мессеж илгээх
-        send_to_chatwoot(conv_id, f"✅ Таны имэйл хаяг ({email}) амжилттай баталгаажлаа! Одоо та chatbot-той харилцаж болно.")
+        send_to_chatwoot(conv_id, 
+            f"🎉 Таны имэйл хаяг ({email}) амжилттай баталгаажлаа!\n\n"
+            "✅ Одоо та бидний AI туслахтай бүрэн харилцах боломжтой боллоо.\n\n"
+            "🤖 Асуулт асууж эхэлнэ үү!")
         
         return render_template_string("""
         <!DOCTYPE html>
@@ -708,21 +800,83 @@ def verify_email():
             <title>Имэйл баталгаажлаа</title>
             <meta charset="utf-8">
             <style>
-                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-                .success { color: green; font-size: 24px; margin: 20px 0; }
-                .info { color: #666; font-size: 16px; }
+                body { 
+                    font-family: Arial, sans-serif; 
+                    text-align: center; 
+                    padding: 50px; 
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    color: white;
+                    min-height: 100vh;
+                    margin: 0;
+                }
+                .container {
+                    background: rgba(255,255,255,0.1);
+                    padding: 40px;
+                    border-radius: 15px;
+                    backdrop-filter: blur(10px);
+                    max-width: 500px;
+                    margin: 0 auto;
+                }
+                .success { 
+                    color: #4CAF50; 
+                    font-size: 28px; 
+                    margin: 20px 0; 
+                    font-weight: bold;
+                }
+                .info { 
+                    font-size: 18px; 
+                    line-height: 1.6;
+                    margin: 20px 0;
+                }
+                .email { 
+                    background: rgba(255,255,255,0.2); 
+                    padding: 10px; 
+                    border-radius: 8px; 
+                    font-weight: bold;
+                }
             </style>
         </head>
         <body>
-            <div class="success">✅ Амжилттай баталгаажлаа!</div>
-            <div class="info">Таны имэйл хаяг ({{ email }}) баталгаажлаа.<br>Одоо та chatbot-тойгоо харилцаж болно.</div>
+            <div class="container">
+                <div class="success">🎉 Амжилттай баталгаажлаа!</div>
+                <div class="info">
+                    Таны имэйл хаяг баталгаажлаа:<br>
+                    <div class="email">{{ email }}</div>
+                </div>
+                <div class="info">
+                    ✅ Одоо та AI туслахтай бүрэн харилцах боломжтой боллоо!<br>
+                    🤖 Чат цонхруу буцаж очоод асуулт асууж эхэлнэ үү.
+                </div>
+            </div>
         </body>
         </html>
         """, email=email)
         
     except Exception as e:
         print(f"Verification алдаа: {e}")
-        return "Баталгаажуулахад алдаа гарлаа!", 500
+        return render_template_string("""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Алдаа гарлаа</title>
+            <meta charset="utf-8">
+            <style>
+                body { 
+                    font-family: Arial, sans-serif; 
+                    text-align: center; 
+                    padding: 50px; 
+                    background: #f44336;
+                    color: white;
+                }
+                .error { font-size: 24px; margin: 20px 0; }
+            </style>
+        </head>
+        <body>
+            <div class="error">❌ Баталгаажуулахад алдаа гарлаа!</div>
+            <div>Дахин оролдоно уу эсвэл дэмжлэгтэй холбогдоно уу.</div>
+        </body>
+        </html>
+        """), 500
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -799,15 +953,23 @@ def webhook():
             if is_valid_email(message_content):
                 print(f"📧 Зөв имэйл: {message_content}")
                 
+                # Contact үүсгэх эсвэл шинэчлэх
+                new_contact_id = create_or_update_contact(message_content)
+                if new_contact_id:
+                    # Conversation-д contact оноох
+                    assign_contact_to_conversation(conv_id, new_contact_id)
+                    print(f"✅ Contact {new_contact_id} бүртгэж, conversation-д оноолоо")
+                
                 # Баталгаажуулах токен үүсгэх
                 token = generate_verification_token(message_content, conv_id, contact_id)
                 
                 # Имэйл илгээх
                 if send_verification_email(message_content, token):
                     send_to_chatwoot(conv_id, 
-                        f"📧 Таны имэйл хаяг ({message_content}) рүү баталгаажуулах линк илгээлээ.\n\n"
-                        "Имэйлээ шалгаад линк дээр дарна уу. Линк 24 цагийн дараа хүчингүй болно.\n\n"
-                        "⚠️ Spam фолдерыг шалгахаа мартуузай!")
+                        f"✅ Таны имэйл хаяг ({message_content}) рүү баталгаажуулах линк илгээлээ.\n\n"
+                        "📧 Имэйлээ шалгаад линк дээр дарна уу. Линк 24 цагийн дараа хүчингүй болно.\n\n"
+                        "⚠️ Spam фолдерыг шалгахаа мартуузай!\n\n"
+                        "🎯 Баталгаажуулсны дараа та бидний AI туслахтай бүрэн харилцах боломжтой болно.")
                     print("✅ Имэйл амжилттай илгээлээ")
                 else:
                     send_to_chatwoot(conv_id, "❌ Имэйл илгээхэд алдаа гарлаа. Дахин оролдоно уу.")
@@ -815,9 +977,10 @@ def webhook():
             else:
                 print(f"❌ Буруу имэйл формат: '{message_content}'")
                 send_to_chatwoot(conv_id, 
-                    "👋 Сайн байна уу! Chatbot ашиглахын тулд эхлээд имэйл хаягаа баталгаажуулна уу.\n\n"
+                    "👋 Сайн байна уу! AI туслахтай харилцахын тулд эхлээд имэйл хаягаа баталгаажуулна уу.\n\n"
                     "📧 Зөв имэйл хаягаа бичээд илгээнэ үү.\n"
-                    "Жишээ: example@gmail.com")
+                    "Жишээ: example@gmail.com\n\n"
+                    "✨ Баталгаажуулсны дараа та манай AI туслахтай бүрэн харилцах боломжтой болно!")
             
             return jsonify({"status": "waiting_verification"}), 200
 
@@ -958,7 +1121,8 @@ def webhook():
                 message_content, 
                 verified_email, 
                 "RAG болон AI Assistant хоёулаа бүтэлгүйтэв",
-                f"Thread ID: {thread_id}, Хоёр систем алдаа гаргалаа"
+                f"Thread ID: {thread_id}, Хоёр систем алдаа гаргалаа",
+                thread_id
             )
             
             final_response = (
@@ -981,18 +1145,16 @@ def webhook():
                 should_escalate, escalation_reason = should_escalate_to_teams(thread_id, message_content)
                 
                 if should_escalate:
-                    # AI дүгнэлт хийх
-                    ai_analysis = analyze_customer_issue(thread_id, message_content, verified_email)
-                    
-                    # Teams мэдээлэх
+                    # Teams мэдээлэх - GPT дүгнэлттэй
                     send_teams_notification(
                         conv_id, 
                         message_content, 
                         verified_email, 
                         escalation_reason,
-                        ai_analysis
+                        None,  # ai_analysis-г функц дотор үүсгэнэ
+                        thread_id
                     )
-                    print(f"📢 Teams мэдээлэл илгээлээ: {escalation_reason}")
+                    print(f"📢 Teams GPT дүгнэлттэй мэдээлэл илгээлээ: {escalation_reason}")
         except Exception as e:
             print(f"❌ Teams мэдээлэх алдаа: {e}")
         
@@ -1119,13 +1281,15 @@ def rebuild_docs():
         return jsonify({"error": f"Алдаа: {str(e)}"}), 500
 
 def should_escalate_to_teams(thread_id, current_message):
-    """Тухайн асуудлыг Teams-д илгээх хэрэгтэй эсэхийг шийдэх"""
+    """Тухайн асуудлыг Teams-д илгээх хэрэгтэй эсэхийг шийдэх - GPT ашиглан"""
     try:
-        # OpenAI thread-с сүүлийн 20 мессежийг авах
-        messages = client.beta.threads.messages.list(thread_id=thread_id, limit=20)
+        # OpenAI thread-с сүүлийн 15 мессежийг авах
+        messages = client.beta.threads.messages.list(thread_id=thread_id, limit=15)
         
         # Хэрэглэгчийн мессежүүдийг цуглуулах
         user_messages = []
+        ai_responses = []
+        
         for msg in reversed(messages.data):
             if msg.role == "user":
                 content = ""
@@ -1134,28 +1298,45 @@ def should_escalate_to_teams(thread_id, current_message):
                         content += content_block.text.value
                 if content.strip():
                     user_messages.append(content.strip())
+            elif msg.role == "assistant":
+                content = ""
+                for content_block in msg.content:
+                    if hasattr(content_block, 'text'):
+                        content += content_block.text.value
+                if content.strip():
+                    ai_responses.append(content.strip()[:100])  # Хязгаарлах
         
-        # Хэрэв анхны мессеж бол Teams-д илгээх
+        # Хэрэв анхны мессеж бол заавал Teams-д илгээх
         if len(user_messages) <= 1:
-            return True, "Анхны асуулт"
+            return True, "Анхны харилцагчийн асуулт"
         
-        # AI-аар шинэ асуудал мөн эсэхийг шалгах
+        # GPT-аар escalation шаардлагатай эсэхийг шалгах
         system_msg = (
-            "Та бол чат дүн шинжилгээний мэргэжилтэн. "
-            "Хэрэглэгчийн сүүлийн мессеж нь шинэ асуудал мөн эсэхийг тодорхойлно уу."
+            "Та бол дэмжлэгийн менежер. Хэрэглэгчийн чат түүхийг харж, "
+            "техникийн ажилтанд хуваарилах шаардлагатай эсэхийг шийднэ. "
+            "Дараах тохиолдолд ESCALATE гэж хариулна уу:\n"
+            "- Шинэ төрлийн техникийн асуудал\n"
+            "- AI хариулт хангалтгүй байгаа\n"
+            "- Хэрэглэгч дахин дахин ижил асуудлыг асууж байгаа\n"
+            "- Гомдол эсвэл сэтгэл дундуур байдал\n"
+            "- Нарийн техникийн тохиргоо шаардлагатай\n\n"
+            "Энгийн асуулт, мэдээлэл авах гэх мэт бол NO_ESCALATE гэж хариулна уу."
         )
         
-        user_msg = f'''
-Хэрэглэгчийн өмнөх мессежүүд:
-{chr(10).join(user_messages[:-1])}
+        # Чат түүхийг бэлтгэх
+        chat_context = f"Хэрэглэгчийн мессежүүд:\n"
+        for i, msg in enumerate(user_messages[-5:], 1):  # Сүүлийн 5 мессеж
+            chat_context += f"{i}. {msg}\n"
+        
+        if ai_responses:
+            chat_context += f"\nAI хариултууд байсан: {len(ai_responses)} удаа"
+        
+        user_msg = f'''{chat_context}
 
 Одоогийн мессеж: "{current_message}"
 
-Дараах аль нэгээр хариулна уу:
-- "ШИН_АСУУДАЛ" - хэрэв одоогийн мессеж шинэ төрлийн асуудал бол
-- "ҮРГЭЛЖЛЭЛ" - хэрэв өмнөх асуудлын үргэлжлэл, тодруулга бол
-- "ДАХИН_АСУУЛТ" - хэрэв ижил асуудлыг дахин асууж байгаа бол
-'''
+Энэ асуудлыг техникийн ажилтанд хуваарилах шаардлагатай юу?
+Зөвхөн "ESCALATE" эсвэл "NO_ESCALATE" гэж хариулна уу.'''
         
         response = client.chat.completions.create(
             model="gpt-4",
@@ -1164,20 +1345,40 @@ def should_escalate_to_teams(thread_id, current_message):
                 {"role": "user", "content": user_msg}
             ],
             max_tokens=50,
-            temperature=0.1
+            temperature=0.1,
+            timeout=10
         )
         
-        analysis_result = response.choices[0].message.content.strip()
+        analysis_result = response.choices[0].message.content.strip().upper()
         
-        if "ШИН_АСУУДАЛ" in analysis_result:
-            return True, "Шинэ асуудал илрэв"
+        if "ESCALATE" in analysis_result:
+            # Escalation шалтгааныг тодорхойлох
+            if len(user_messages) <= 2:
+                reason = "Шинэ харилцагчийн асуудал"
+            elif len(user_messages) >= 5:
+                reason = "Олон удаагийн харилцаа - нарийн асуудал"
+            else:
+                reason = "GPT-ээр шалгахад техникийн анхаарал шаардлагатай"
+            
+            return True, reason
         else:
-            return False, "Өмнөх асуудлын үргэлжлэл"
+            return False, "Энгийн асуулт - AI хариулт хангалттай"
             
     except Exception as e:
         print(f"❌ Escalation шийдэх алдаа: {e}")
-        # Алдаа гарвал анхны мессеж гэж үзэх
-        return True, "Алдаа - анхны мессеж гэж үзэв"
+        # Алдаа гарвал анхны мессеж эсвэл олон мессеж байвал escalate хийх
+        try:
+            messages = client.beta.threads.messages.list(thread_id=thread_id, limit=5)
+            user_count = sum(1 for msg in messages.data if msg.role == "user")
+            
+            if user_count <= 1:
+                return True, "Анхны мессеж (алдаа гарсан)"
+            elif user_count >= 4:
+                return True, "Олон удаагийн харилцаа (алдаа гарсан)"
+            else:
+                return False, "Дунд зэргийн харилцаа"
+        except:
+            return True, "Системийн алдаа - анхаарал шаардлагатай"
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
