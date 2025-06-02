@@ -1,0 +1,35 @@
+# OpenAI тохиргоо
+OPENAI_API_KEY=sk-your-openai-api-key-here
+ASSISTANT_ID=asst_your-assistant-id-here
+
+# Chatwoot тохиргоо
+CHATWOOT_API_KEY=your-chatwoot-api-token-here
+ACCOUNT_ID=1
+CHATWOOT_BASE_URL=https://app.chatwoot.com
+
+# Chatwoot API Channel тохиргоо
+INBOX_ID=123  # API channel-ийн inbox ID
+DEFAULT_SOURCE_ID_PREFIX=api_user_  # Source ID prefix (сонголт)
+
+# Email тохиргоо (Gmail)
+SENDER_EMAIL=your-email@gmail.com
+SENDER_PASSWORD=your-app-password-here
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
+
+# Microsoft Teams тохиргоо (сонголт)
+TEAMS_WEBHOOK_URL=https://your-teams-webhook-url-here
+
+# RAG документ системийн тохиргоо
+DOCS_BASE_URL=https://docs.cloud.mn
+
+# JWT тохиргоо
+JWT_SECRET=your-very-secure-secret-key-here
+VERIFICATION_URL_BASE=http://localhost:5000
+
+# Тайлбар:
+# 1. OpenAI API key болон Assistant ID-г OpenAI platform-аас авна уу
+# 2. Chatwoot API token-г Settings > Applications > API Access Tokens-аас үүсгэнэ үү
+# 3. Gmail App Password үүсгэхийн тулд 2FA идэвхжүүлэх шаардлагатай
+# 4. API Channel үүсгэхийн тулд Chatwoot дээр Settings > Inboxes > Add Inbox > API сонгоно уу
+# 5. Teams webhook URL нь сонголт - Teams мэдээлэл авахыг хүсвэл тохируулна уу 
