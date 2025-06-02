@@ -885,84 +885,17 @@ def webhook():
         data = request.json
         print(f"🔄 Webhook received: {data.get('message_type', 'unknown')}")
         
-        # ========== WEBHOOK DATA ДЭЛГЭРЭНГҮЙ ШАЛГАХ ==========
-        print("📊 Webhook data дэлгэрэнгүй:")
-        print(f"   - message_type: {data.get('message_type')}")
-        print(f"   - content: '{data.get('content', '')}'")
-        print(f"   - conversation: {data.get('conversation', {}).get('id', 'None')}")
-        
-        # SaaS Chatwoot-д өөр бүтэцтэй байж болох тул бүх боломжит content field шалгах
-        possible_content_fields = ['content', 'message', 'text', 'body']
-        message_content = ""
-        
-        for field in possible_content_fields:
-            if field in data and data[field]:
-                message_content = str(data[field]).strip()
-                print(f"   - Found content in '{field}': '{message_content}'")
-                break
-        
-        # Хэрэв message object дотор content байвал
-        if not message_content and 'message' in data and isinstance(data['message'], dict):
-            for field in possible_content_fields:
-                if field in data['message'] and data['message'][field]:
-                    message_content = str(data['message'][field]).strip()
-                    print(f"   - Found content in message.{field}: '{message_content}'")
-                    break
-        
-        # Хэрэв payload дотор байвал
-        if not message_content and 'payload' in data:
-            payload = data['payload']
-            for field in possible_content_fields:
-                if field in payload and payload[field]:
-                    message_content = str(payload[field]).strip()
-                    print(f"   - Found content in payload.{field}: '{message_content}'")
-                    break
-        
-        print(f"📝 Final message content: '{message_content}'")
-        
         # Зөвхөн incoming мессеж боловсруулах
         if data.get("message_type") != "incoming":
             print("⏭️ Skipping: not incoming message")
             return jsonify({"status": "skipped - not incoming"}), 200
 
-        # Conversation ID олох - илүү найдвартай аргаар
-        conv_id = None
+        # Үндсэн мэдээлэл авах
+        conv_id = data["conversation"]["id"]
+        message_content = data.get("content", "").strip()
         
-        # Эхлээд шууд conversation.id хайх
-        if "conversation" in data and isinstance(data["conversation"], dict):
-            conv_id = data["conversation"].get("id")
-            print(f"📞 Conversation ID from conversation.id: {conv_id}")
+        print(f"📝 Conv ID: {conv_id}, Message: '{message_content}'")
         
-        # Хэрэв олдохгүй бол conversation_id хайх
-        if not conv_id:
-            conv_id = data.get("conversation_id")
-            print(f"📞 Conversation ID from conversation_id: {conv_id}")
-        
-        # Хэрэв payload дотор байвал
-        if not conv_id and "payload" in data:
-            payload = data["payload"]
-            if "conversation" in payload:
-                conv_id = payload["conversation"].get("id")
-                print(f"📞 Conversation ID from payload.conversation.id: {conv_id}")
-        
-        if not conv_id:
-            print("❌ Conversation ID олдсонгүй!")
-            return jsonify({"status": "error - no conversation ID"}), 400
-        
-        print(f"✅ Conv ID тогтоогдлоо: {conv_id}")
-        
-        # Хэрэв мессеж хоосон бол
-        if not message_content:
-            print("⚠️ Мессежийн агуулга хоосон байна")
-            # Webhook data бүхэлд нь хэвлэх debug-ийн тулд
-            print("🔍 Бүх webhook data:")
-            import json
-            print(json.dumps(data, indent=2, ensure_ascii=False))
-            
-            send_to_chatwoot(conv_id, 
-                "🤔 Таны мессеж хоосон байна. Дахин оролдоно уу.")
-            return jsonify({"status": "empty message"}), 200
-
         # Contact ID олох - илүү найдвартай аргаар
         contact_id = None
         customer_name = "Тодорхойгүй"
@@ -972,13 +905,6 @@ def webhook():
             contact_id = data["sender"].get("id")
             customer_name = data["sender"].get("name", "Тодорхойгүй")
             print(f"👤 Webhook-ээс Contact ID: {contact_id}, Name: {customer_name}")
-        
-        # Хэрэв payload дотор байвал
-        if not contact_id and "payload" in data and "sender" in data["payload"]:
-            sender = data["payload"]["sender"]
-            contact_id = sender.get("id")
-            customer_name = sender.get("name", "Тодорхойгүй")
-            print(f"👤 Payload-аас Contact ID: {contact_id}, Name: {customer_name}")
         
         # Хэрэв webhook дээр contact байхгүй бол conversation-аас хайх
         if not contact_id:
@@ -1495,202 +1421,6 @@ def should_escalate_to_teams(thread_id, current_message):
                 return False, "Дунд зэргийн харилцаа"
         except:
             return True, "Системийн алдаа - анхаарал шаардлагатай"
-
-@app.route("/webhook-debug", methods=["POST"])
-def webhook_debug():
-    """Webhook data-г дэлгэрэнгүй шалгах debug endpoint"""
-    try:
-        data = request.json
-        
-        print("🔍 WEBHOOK DEBUG - Бүх мэдээлэл:")
-        print("=" * 50)
-        
-        import json
-        formatted_data = json.dumps(data, indent=2, ensure_ascii=False)
-        print(formatted_data)
-        
-        print("=" * 50)
-        print("📊 Гол мэдээллүүд:")
-        print(f"   - message_type: {data.get('message_type')}")
-        print(f"   - event: {data.get('event')}")
-        print(f"   - account: {data.get('account', {}).get('id', 'None')}")
-        
-        # Content хайх
-        content_found = []
-        possible_fields = ['content', 'message', 'text', 'body']
-        
-        for field in possible_fields:
-            if field in data and data[field]:
-                content_found.append(f"{field}: '{data[field]}'")
-        
-        if 'message' in data and isinstance(data['message'], dict):
-            for field in possible_fields:
-                if field in data['message']:
-                    content_found.append(f"message.{field}: '{data['message'][field]}'")
-        
-        if 'payload' in data:
-            for field in possible_fields:
-                if field in data['payload']:
-                    content_found.append(f"payload.{field}: '{data['payload'][field]}'")
-        
-        print(f"   - Content fields олдлоо: {content_found}")
-        
-        # Conversation ID хайх
-        conv_ids = []
-        if 'conversation' in data and isinstance(data['conversation'], dict):
-            conv_ids.append(f"conversation.id: {data['conversation'].get('id')}")
-        if 'conversation_id' in data:
-            conv_ids.append(f"conversation_id: {data['conversation_id']}")
-        if 'payload' in data and 'conversation' in data['payload']:
-            conv_ids.append(f"payload.conversation.id: {data['payload']['conversation'].get('id')}")
-        
-        print(f"   - Conversation IDs: {conv_ids}")
-        
-        # Contact/Sender мэдээлэл хайх
-        contacts = []
-        if 'sender' in data:
-            contacts.append(f"sender: {data['sender']}")
-        if 'payload' in data and 'sender' in data['payload']:
-            contacts.append(f"payload.sender: {data['payload']['sender']}")
-        if 'contact' in data:
-            contacts.append(f"contact: {data['contact']}")
-        
-        print(f"   - Contact/Sender мэдээлэл: {contacts}")
-        
-        print("=" * 50)
-        
-        # Response буцаах
-        return jsonify({
-            "status": "debug_complete",
-            "message_type": data.get('message_type'),
-            "content_fields": content_found,
-            "conversation_ids": conv_ids,
-            "contact_info": contacts,
-            "full_data": data
-        }), 200
-        
-    except Exception as e:
-        print(f"❌ Webhook debug алдаа: {e}")
-        return jsonify({"status": f"debug_error: {str(e)}"}), 500
-
-@app.route("/test-webhook", methods=["GET"])
-def test_webhook():
-    """Webhook тест хийх заавар"""
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Webhook Debug Заавар</title>
-        <meta charset="utf-8">
-        <style>
-            body { 
-                font-family: Arial, sans-serif; 
-                padding: 20px; 
-                background: #f5f5f5;
-                line-height: 1.6;
-            }
-            .container {
-                max-width: 800px;
-                margin: 0 auto;
-                background: white;
-                padding: 30px;
-                border-radius: 10px;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            }
-            .code {
-                background: #f8f9fa;
-                padding: 15px;
-                border-radius: 5px;
-                border-left: 4px solid #007bff;
-                margin: 10px 0;
-                font-family: monospace;
-            }
-            .warning {
-                background: #fff3cd;
-                border: 1px solid #ffeaa7;
-                padding: 15px;
-                border-radius: 5px;
-                margin: 15px 0;
-            }
-            .success {
-                background: #d4edda;
-                border: 1px solid #c3e6cb;
-                padding: 15px;
-                border-radius: 5px;
-                margin: 15px 0;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🔍 Chatwoot Webhook Debug Заавар</h1>
-            
-            <div class="warning">
-                <strong>⚠️ Асуудал:</strong> Хэрэглэгчийн бичсэн текст Chatwoot дээр ирэхгүй байгаа ч AI хариулт авч болж байна.
-            </div>
-            
-            <h2>🛠️ Шийдлийн алхамууд:</h2>
-            
-            <h3>1. Webhook URL-уудыг Chatwoot дээр тохируулах:</h3>
-            <div class="code">
-                Үндсэн webhook: {{ base_url }}/webhook<br>
-                Debug webhook: {{ base_url }}/webhook-debug
-            </div>
-            
-            <h3>2. Debug webhook ашиглан data бүтцийг шалгах:</h3>
-            <p>Chatwoot Settings → Integrations → Webhooks дээр debug URL нэмээд хэрэглэгч мессеж бичүүлээрэй.</p>
-            
-            <h3>3. Console логуудыг шалгах:</h3>
-            <div class="code">
-                # Серверийн логуудыг харах<br>
-                tail -f your_app.log<br>
-                # эсвэл Python console дээр харах
-            </div>
-            
-            <h3>4. Webhook events тохируулах:</h3>
-            <p>Chatwoot дээр дараах events-уудыг идэвхжүүлэх:</p>
-            <div class="code">
-                ✅ message_created<br>
-                ✅ conversation_created<br>
-                ❌ message_updated (хэрэггүй)<br>
-                ❌ conversation_updated (хэрэггүй)
-            </div>
-            
-            <div class="success">
-                <strong>✅ Хэрэв debug webhook ажиллаж байвал:</strong><br>
-                Webhook data-н бүтцийг console дээр харж, үндсэн webhook-г тохируулна.
-            </div>
-            
-            <h3>5. SaaS Chatwoot онцлог тохиргоо:</h3>
-            <p>SaaS Chatwoot зарим тохиолдолд өөр webhook format ашигладаг:</p>
-            <div class="code">
-                # Магадгүй энэ format байж болно:<br>
-                {<br>
-                &nbsp;&nbsp;"event": "message_created",<br>
-                &nbsp;&nbsp;"payload": {<br>
-                &nbsp;&nbsp;&nbsp;&nbsp;"message": {<br>
-                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"content": "хэрэглэгчийн текст"<br>
-                &nbsp;&nbsp;&nbsp;&nbsp;}<br>
-                &nbsp;&nbsp;}<br>
-                }
-            </div>
-            
-            <h3>6. Алдаа засварлах:</h3>
-            <ul>
-                <li>Webhook URL зөв тохируулсан эсэхийг шалгах</li>
-                <li>HTTPS ашиглаж байгаа эсэхийг шалгах</li>
-                <li>Firewall болон port тохиргоог шалгах</li>
-                <li>Chatwoot account ID болон API key зөв эсэхийг шалгах</li>
-            </ul>
-            
-            <div class="warning">
-                <strong>🔧 Хэрэв асуудал үргэлжилвэл:</strong><br>
-                Debug webhook-н үр дүнг илгээж өгөөрэй. Тэгвэл webhook data-н бүтцийг харж, кодыг тохируулна.
-            </div>
-        </div>
-    </body>
-    </html>
-    """, base_url=VERIFICATION_URL_BASE)
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
