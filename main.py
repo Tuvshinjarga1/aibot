@@ -1,5 +1,4 @@
 import os
-import time
 import requests
 import re
 import jwt
@@ -9,40 +8,38 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template_string
 
-# ── .env-аас утгуудыг унших ───────────────────────────────────────────────────────
+# ── Load .env ───────────────────────────────────────────────────────────────────
 from dotenv import load_dotenv
 load_dotenv()
 
-# ── Лог тохиргоо ─────────────────────────────────────────────────────────────────
+# ── Logging ─────────────────────────────────────────────────────────────────────
 import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ── Орчны хувьсагчид ─────────────────────────────────────────────────────────────
-CHATWOOT_API_KEY       = os.getenv("CHATWOOT_API_KEY", "").strip()
-ACCOUNT_ID             = os.getenv("ACCOUNT_ID", "").strip()
-INBOX_ID               = os.getenv("INBOX_ID", "").strip()
-CHATWOOT_BASE_URL      = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com").rstrip("/")
+# ── Environment variables ────────────────────────────────────────────────────────
+CHATWOOT_API_KEY      = os.getenv("CHATWOOT_API_KEY", "").strip()
+ACCOUNT_ID            = os.getenv("ACCOUNT_ID", "").strip()
+# API Channel ашиглахгүй тул INBOX_ID-ыг ашиглахгүй
 
-# SMTP (имэйл илгээх) тохиргоо
-SENDER_EMAIL           = os.getenv("SENDER_EMAIL", "").strip()
-SENDER_PASSWORD        = os.getenv("SENDER_PASSWORD", "").strip()
-SMTP_SERVER            = os.getenv("SMTP_SERVER", "smtp.gmail.com").strip()
-SMTP_PORT              = int(os.getenv("SMTP_PORT", "587"))
+SENDER_EMAIL          = os.getenv("SENDER_EMAIL", "").strip()
+SENDER_PASSWORD       = os.getenv("SENDER_PASSWORD", "").strip()
+SMTP_SERVER           = os.getenv("SMTP_SERVER", "smtp.gmail.com").strip()
+SMTP_PORT             = int(os.getenv("SMTP_PORT", "587"))
 
-# Баталгаажуулах токен болон линк үүсгэх тохиргоо
-JWT_SECRET             = os.getenv("JWT_SECRET", "your-secret-key-here").strip()
-VERIFICATION_URL_BASE  = os.getenv("VERIFICATION_URL_BASE", "http://localhost:5000").strip()
+VERIFICATION_URL_BASE = os.getenv("VERIFICATION_URL_BASE", "http://localhost:5000").strip()
+JWT_SECRET            = os.getenv("JWT_SECRET", "your-secret-key-here").strip()
 
 # Microsoft Teams webhook (заавал биш)
-TEAMS_WEBHOOK_URL      = os.getenv("TEAMS_WEBHOOK_URL", "").strip()
+TEAMS_WEBHOOK_URL     = os.getenv("TEAMS_WEBHOOK_URL", "").strip()
 
-# ── Туслах функцууд ──────────────────────────────────────────────────────────────
+
+# ── Помощник функций ─────────────────────────────────────────────────────────────
 
 def is_valid_email(email: str) -> bool:
-    """Имэйл хэлбэр зөв эсэхийг шалгах."""
+    """Имэйл хаяг зөв эсэх шалгах."""
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
@@ -57,7 +54,7 @@ def generate_verification_token(email: str, conv_id: int, contact_id: int) -> st
     return jwt.encode(payload, JWT_SECRET, algorithm='HS256')
 
 def verify_token(token: str):
-    """JWT токеныг шалгах."""
+    """JWT токен шалгах."""
     try:
         return jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
@@ -65,8 +62,8 @@ def verify_token(token: str):
 
 def send_verification_email(email: str, token: str) -> bool:
     """
-    Имэйл рүү баталгаажуулах линк илгээх.
-    Баталгаажуулах линк нь /verify?token=<JWT> хэлбэртэй.
+    Баталгаажуулах линк рүү имэйл илгээх.
+    /verify?token=<JWT> хэлбэртэй URL болно.
     """
     try:
         verification_url = f"{VERIFICATION_URL_BASE}/verify?token={token}"
@@ -112,10 +109,7 @@ def get_contact(contact_id: int) -> dict:
     return resp.json()
 
 def update_contact(contact_id: int, attrs: dict) -> dict:
-    """
-    Contact-ийн custom_attributes шинэчлэх.
-    Жишээ: {"email_verified": "true", "verified_email": "user@example.com"}
-    """
+    """Contact-ийн custom_attributes шинэчлэх."""
     url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/{contact_id}"
     headers = {
         "api_access_token": CHATWOOT_API_KEY,
@@ -126,60 +120,8 @@ def update_contact(contact_id: int, attrs: dict) -> dict:
     resp.raise_for_status()
     return resp.json()
 
-def create_or_update_contact(email_or_name: str) -> int:
-    """
-    Хэрвээ имэйл гэж бичигдсэн бол тухайн Contact-ийг хайж, байвал ID-ийг буцаах.
-    Байхгүй бол шинээр үүсгээд ID буцаах.
-    Заавал имэйл биш бол name талбарт шууд бичнэ.
-    """
-    # 1) Имэйлээр хайж үзэх
-    search_url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/search"
-    headers = {"api_access_token": CHATWOOT_API_KEY}
-    resp = requests.get(search_url, params={"q": email_or_name}, headers=headers)
-    resp.raise_for_status()
-    payload = resp.json().get("payload", [])
-    if payload:
-        existing = payload[0]
-        return existing["id"]
-
-    # 2) Шинээр үүсгэх
-    create_url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts"
-    headers = {
-        "api_access_token": CHATWOOT_API_KEY,
-        "Content-Type": "application/json"
-    }
-    is_email = is_valid_email(email_or_name)
-    contact_data = {
-        "name": email_or_name if not is_email else email_or_name.split("@")[0],
-        "email": email_or_name if is_email else None
-    }
-    resp = requests.post(create_url, json=contact_data, headers=headers)
-    resp.raise_for_status()
-    new_contact = resp.json()["payload"]["contact"]
-    return new_contact["id"]
-
-def create_conversation(contact_id: int) -> int:
-    """
-    Шинэ Conversation үүсгэх (API Channel Inbox дээр).
-    """
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
-    headers = {
-        "api_access_token": CHATWOOT_API_KEY,
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "contact_id": contact_id,
-        "inbox_id": INBOX_ID
-    }
-    resp = requests.post(url, json=payload, headers=headers)
-    resp.raise_for_status()
-    conv = resp.json()["payload"]["conversation"]
-    return conv["id"]
-
 def send_to_chatwoot(conv_id: int, text: str) -> None:
-    """
-    Chatwoot руу outgoing (агент) мессеж илгээх.
-    """
+    """Chatwoot руу outgoing (агент) мессеж илгээх."""
     url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/messages"
     headers = {
         "api_access_token": CHATWOOT_API_KEY,
@@ -197,9 +139,7 @@ def send_to_chatwoot(conv_id: int, text: str) -> None:
 
 def send_teams_notification(conv_id: int, customer_message: str, customer_email: str = None,
                             escalation_reason: str = "Хэрэглэгчийн асуудал", ai_analysis: str = None) -> bool:
-    """
-    Microsoft Teams руу техникийн мэдээлэл илгээх (заавал биш).
-    """
+    """Microsoft Teams рүү техникийн мэдээлэл илгээх (заавал биш)."""
     if not TEAMS_WEBHOOK_URL:
         return False
     try:
@@ -244,14 +184,16 @@ def send_teams_notification(conv_id: int, customer_message: str, customer_email:
         logger.error(f"Teams мэдээлэл илгээхэд алдаа: {e}")
         return False
 
+
 # ── Flask Routes ────────────────────────────────────────────────────────────────
 
 @app.route("/verify", methods=["GET"])
 def verify_email():
     """
     /verify?token=<JWT> endpoint:
-    Баталгаажуулах линкээр хандсан тохиолдолд token-ийн хүчинтэйг шалгаж,
-    тухайн контакт дээр email_verified=true болгож тэмдэглэнэ.
+    - Баталгаажуулах линкээр хандсан тохиолдолд токений хүчинтэйг шалгаж,
+      тухайн контакт дээр email_verified=true болгож тэмдэглэнэ.
+    - Мөн Chatwoot руу “имэйл баталгаажлаа” гэсэн outgoing мессеж илгээнэ.
     """
     token = request.args.get('token')
     if not token:
@@ -266,18 +208,17 @@ def verify_email():
         contact_id = payload['contact_id']
         email      = payload['email']
 
-        # Contact дээр баталгаажуулсан тэмдэг нэмэх
+        # Contact дээр баталгаажуулалтын тэмдэг нэмэх
         update_contact(contact_id, {
             "email_verified": "true",
             "verified_email": email,
             "verification_date": datetime.utcnow().isoformat()
         })
 
-        # Баталгаажсан pull request таны кодонд байхгүй тул эдгээрийг бичих шаардлагагүй 
-        # send_to_chatwoot-р дамжуулан Chatwoot-д мэдэгдэх:
-        send_to_chatwoot(conv_id, f"✅ Таны имэйл хаяг ({email}) баталгаажлаа! Одоо та AI BOT-тэй харьцаж болно.")
+        # Chatwoot руу мэдэгдэх
+        send_to_chatwoot(conv_id, f"✅ Таны имэйл хаяг ({email}) баталгаажлаа! Одоо бот-тэй харилцаж болно.")
 
-        # Амжилттай баталгаажуулсан талаарх HTML хуудас буцаах
+        # Амжилттай баталгаажуулсны дараах HTML хуудас
         return render_template_string("""
 <!DOCTYPE html>
 <html>
@@ -292,14 +233,14 @@ def verify_email():
     </style>
 </head>
 <body>
-    <div class="success">🎉 Имэйл баталгаажуулалт амжилттай!</div>
+    <div class="success">🎉 Имэйл баталгаажуулах амжилттай!</div>
     <div class="info">
-        Таны имэйл хаяг баталгаажлаа:<br>
+        Баталгаажих имэйл хаяг:<br>
         <div class="email">{{ email }}</div>
     </div>
     <div class="info">
-        ✅ Одоо та AI BOT-тэй харилцаж болно!<br>
-        🤖 Chatwoot-д очиж асуулт асуугаарай.
+        ✅ Одоо та бот-тэй харилцаж болно!<br>
+        🤖 Chatwoot чат цонх руу буцаж асуултаа бичнэ үү.
     </div>
 </body>
 </html>
@@ -309,54 +250,47 @@ def verify_email():
         logger.error(f"Verification алдаа: {e}")
         return "Баталгаажуулахад алдаа гарлаа!", 500
 
+
 @app.route("/webhook", methods=["POST"])
 def webhook_handler():
     """
     Chatwoot webhook handler:
-    - Хэрвээ мессеж ирвэл contact_id-ээ шалгаж, баталгаажсан эсэхийг харна.
-    - Баталгаажуулаагүй бол эхлээд имэйл хаягаа баталгаажуулна уу гэж хэлнэ.
-    - Хэрвээ имэйл маягтай үг ирэхээрэй бол баталгаажуулах линк явуулна.
-    - Баталгаажуулсан contact дээр outgoing (ботын) мессеж илгээх.
+    - Зөвхөн "incoming" мессежэд хариу үйлдэл үзүүлнэ.
+    - Баталгаажуулаагүй бол: "имэйл хаягаа илгээ" → токен үүсгэн илгээх.
+    - Баталгаажсан бол: энгийн echo-бот маягаар reply илгээх.
     """
     try:
         data = request.json or {}
         logger.info(f"🔄 Webhook ирлээ: {data.get('message_type', 'unknown')}")
 
-        # 1) Зөвхөн "incoming" мессежийг боловсруулна
+        # Зөвхөн “incoming” мессеж
         if data.get("message_type") != "incoming":
             return jsonify({"status": "skipped - not incoming"}), 200
 
-        # 2) conversation ID болон мессежийн агуулга
+        # 1) conv_id болон message_content
         conv_id = data.get("conversation", {}).get("id")
         message_content = (data.get("content") or "").strip()
         logger.info(f"📝 conv_id={conv_id}, content='{message_content}'")
 
-        # 3) Contact ID-г ол: 
+        # 2) contact_id
         contact_id = None
         if data.get("sender") and data["sender"].get("id"):
             contact_id = data["sender"]["id"]
 
-        # 4) Хэрвээ contact_id байхгүй бол шинээр үүсгэнэ
+        # Хэрвээ contact_id байхгүй бол → энд бид шинэ contact үүсгэхгүй,
+        # утга нь Chatwoot Inbox дээр ямар нэгэн контакттай холбогдсон гэж үзнэ.
         if not contact_id:
-            # Хэрвээ имэйл маягтай бол contact үүсгэнэ, үгүй бол dummy нэрээр үүсгэнэ.
-            if is_valid_email(message_content):
-                contact_id = create_or_update_contact(message_content)
-            else:
-                contact_id = create_or_update_contact("AnonymousUser")
-            # Мөн шинэ conversation үүсгэх
-            conv_id = create_conversation(contact_id)
-            logger.info(f"👤 Шинэ Contact ID={contact_id}, Шинэ Conversation ID={conv_id}")
-        else:
-            # Хэрвээ conv_id авсангүй бол conversation үүсгэх
-            if not conv_id:
-                conv_id = create_conversation(contact_id)
-                logger.info(f"👤 Missing conv_id, create new Conversation ID={conv_id}")
+            # Шинэ контактгүй бол шууд “имэйлээ бич” гэж хэлэх
+            send_to_chatwoot(conv_id,
+                "👋 Сайн байна уу! Chatbot ашиглахын тулд эхлээд имэйл хаягаа баталгаажуулна уу.\n"
+                "📧 Зөв жишээ: example@gmail.com")
+            return jsonify({"status": "waiting_for_email"}), 200
 
-        # 5) Баталгаажуулалт шалгах
+        # 3) Баталгаажуулалтын статус шалгах
         is_verified = False
         verified_email = ""
 
-        # 5.1 Webhook JSON-д яз contact custom_attributes дээр email_verified байгаа эсэх
+        # 3.1 Webhook JSON дотор contact custom_attributes дунд байгаа эсэх
         if "conversation" in data and "meta" in data["conversation"] and "sender" in data["conversation"]["meta"]:
             attrs = data["conversation"]["meta"]["sender"].get("custom_attributes", {})
             email_verified_value = attrs.get("email_verified", "")
@@ -364,7 +298,7 @@ def webhook_handler():
             is_verified = str(email_verified_value).lower() in ["true", "1", "yes"]
             logger.info(f"Webhook-ээс баталгаажуулсан: {is_verified}, verified_email={verified_email}")
 
-        # 5.2 Хэрвээ 5.1-д баталгаажуулалт байхгүй бол API-аар дахин шалгах
+        # 3.2 Хэрвээ webhook JSON-д байхгүй бол API-аар дахин шалгах
         if not is_verified:
             try:
                 contact = get_contact(contact_id)
@@ -374,36 +308,35 @@ def webhook_handler():
                 is_verified = str(email_verified_value).lower() in ["true", "1", "yes"]
                 logger.info(f"API-аас баталгаажуулсан: {is_verified}, verified_email={verified_email}")
             except Exception as e:
-                logger.error(f"❌ Contact авахад алдаа: {e}")
+                logger.error(f"❌ Contact авах алдаа: {e}")
                 is_verified = False
 
-        # 6) Хэрвээ баталгаажуулаагүй бол а) имэйл маягтай мессеж ирэх эсэхийг шалгах
+        # 4) Хэрвээ баталгаажуулаагүй бол:
         if not is_verified:
-            logger.info("🚫 Баталгаажуулалтгүй, имэйл шаардлагатай")
-
+            logger.info("🚫 Баталгаажуулалтгүй – имэйл шаардлагатай.")
+            # 4.1 Хэрвээ ирсэн content нь email маягтай бол токен үүсгэн имэйл явуулах
             if is_valid_email(message_content):
-                # Имэйл маягтай мессеж ирсэн үед баталгаажуулах линк илгээх
                 token = generate_verification_token(message_content, conv_id, contact_id)
                 if send_verification_email(message_content, token):
                     send_to_chatwoot(conv_id,
                         f"📧 Таны имэйл ({message_content}) рүү баталгаажуулах линк илгээлээ.\n"
-                        "Имэйлээ шалгаад линк дээр дарна уу. Линк 24 цагийн дараа хүчин төгөлдөргүй болно.\n"
+                        "Имэйлээ шалгаж, линк дээр дарна уу. Линк 24 цагийн дараа хүчин төгөлдөргүй болно.\n"
                         "⚠️ Spam фолдерыг шалгахаа мартуузай!")
-                    logger.info("✅ Баталгаажуулах имэйл илгээлээ")
+                    logger.info("✅ Баталгаажуулах имэйл илгээлээ.")
                 else:
                     send_to_chatwoot(conv_id, "❌ Имэйл илгээхэд алдаа гарлаа. Дахин оролдоно уу.")
-                    logger.error("❌ Баталгаажуулах имэйл илгээх алдаа")
+                    logger.error("❌ Баталгаажуулах имэйл илгээхэд алдаа.")
             else:
-                # Имэйл маяггүй болон бусад мессеж ирсэн бол зөв имэйл хүсэх
+                # 4.2 Хэрвээ email маяггүй текст ирсэн бол зөв имэйл хүсэх
                 send_to_chatwoot(conv_id,
-                    "👋 Сайн байна уу! Chatbot ашиглахын тулд эхлээд имэйл хаягаа баталгаажуулна уу.\n"
-                    "📧 Зөвхөн таны ашигладаг имэйл хаягийг яг бичиж илгээнэ үү.")
-            return jsonify({"status": "waiting_verification"}), 200
+                    "👋 Сайн байна уу! Chatbot ашиглахын тулд эхлээд зөв имэйл хаягаа бичээд илгээнэ үү.\n"
+                    "📧 Жишээ: example@gmail.com")
+            return jsonify({"status": "waiting_for_verification"}), 200
 
-        # 7) Баталгаажуулалт амжилттай бол outgoing мессежээр хариу илгээв
-        reply_text = f"🤖 Таны бичсэн мессеж баталгаажиж, AI BOT-д илгээлээ: \"{message_content}\""
+        # 5) Баталгаажуулсан контакт дээр энгийн “echo” маягаар хариу илгээх
+        reply_text = f"🤖 Бот хариулт: \"{message_content}\""
         send_to_chatwoot(conv_id, reply_text)
-        logger.info(f"✅ Баталгаажсан контакт дээр хариу илгээв: {reply_text}")
+        logger.info(f"✅ Баталгаажагдсан контакт дээр хариу илгээлээ: {reply_text}")
 
         return jsonify({"status": "success"}), 200
 
@@ -412,4 +345,5 @@ def webhook_handler():
         return jsonify({"status": f"error: {str(e)}"}), 500
 
 if __name__ == "__main__":
+    # Debug=True бол алдаа гарсан үед дэлгэрэнгүй мэдээлэл гаргана
     app.run(host="0.0.0.0", port=5000, debug=True)
