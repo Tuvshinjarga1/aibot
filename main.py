@@ -10,6 +10,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
+import asyncio
 
 # RAG системийн импорт нэмэх
 from bs4 import BeautifulSoup
@@ -1121,7 +1122,7 @@ def webhook():
                 message_content, 
                 verified_email, 
                 "RAG болон AI Assistant хоёулаа бүтэлгүйтэв",
-                f"Thread ID: {thread_id}, Хоёр систем алдаа гаргалаа",
+                None,
                 thread_id
             )
             
@@ -1379,6 +1380,240 @@ def should_escalate_to_teams(thread_id, current_message):
                 return False, "Дунд зэргийн харилцаа"
         except:
             return True, "Системийн алдаа - анхаарал шаардлагатай"
+
+def send_typing_indicator(conv_id):
+    """Chatwoot дээр typing indicator харуулах"""
+    try:
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/toggle_typing_status"
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        payload = {"typing_status": "on"}
+        
+        response = requests.post(url, json=payload, headers=headers)
+        if response.status_code == 200:
+            print("✅ Typing indicator асаалаа")
+            return True
+        else:
+            print(f"⚠️ Typing indicator асаахад алдаа: {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"❌ Typing indicator алдаа: {e}")
+        return False
+
+def stop_typing_indicator(conv_id):
+    """Chatwoot дээр typing indicator унтраах"""
+    try:
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/toggle_typing_status"
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        payload = {"typing_status": "off"}
+        
+        response = requests.post(url, json=payload, headers=headers)
+        if response.status_code == 200:
+            print("✅ Typing indicator унтраалаа")
+            return True
+        else:
+            print(f"⚠️ Typing indicator унтраахад алдаа: {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"❌ Typing indicator алдаа: {e}")
+        return False
+
+def delayed_bot_response(conv_id, message_content, contact_id, verified_email, delay_seconds=3):
+    """Хэдэн секундын дараа бот хариулах функц"""
+    def process_and_respond():
+        try:
+            print(f"⏰ {delay_seconds} секунд хүлээж байна...")
+            
+            # Typing indicator асаах
+            send_typing_indicator(conv_id)
+            
+            # Тодорхой хугацаа хүлээх
+            time.sleep(delay_seconds)
+            
+            # Thread мэдээлэл бэлтгэх
+            conv = get_conversation(conv_id)
+            conv_attrs = conv.get("custom_attributes", {})
+            thread_key = f"openai_thread_{contact_id}"
+            thread_id = conv_attrs.get(thread_key)
+            
+            # Thread шинээр үүсгэх хэрэгтэй эсэхийг шалгах
+            if not thread_id:
+                print("🧵 Шинэ thread үүсгэж байна...")
+                thread = client.beta.threads.create()
+                thread_id = thread.id
+                update_conversation(conv_id, {thread_key: thread_id})
+                print(f"✅ Thread үүсгэлээ: {thread_id}")
+            else:
+                print(f"✅ Одоо байгаа thread ашиглаж байна: {thread_id}")
+            
+            # Хариултуудыг хадгалах хувьсагчид
+            rag_response = {"answer": None, "sources": [], "success": False}
+            ai_response_text = None
+            ai_success = False
+            
+            # RAG функц
+            def run_rag():
+                nonlocal rag_response
+                try:
+                    print("📚 RAG системээр хайж байна...")
+                    result = search_docs_with_rag(message_content)
+                    if result["answer"] and "алдаа гарлаа" not in result["answer"]:
+                        rag_response = {
+                            "answer": result["answer"],
+                            "sources": result["sources"],
+                            "success": True
+                        }
+                        print(f"✅ RAG амжилттай: {result['answer'][:50]}...")
+                    else:
+                        print("❌ RAG хариулт олдсонгүй")
+                except Exception as e:
+                    print(f"❌ RAG алдаа: {e}")
+            
+            # AI Assistant функц
+            def run_ai_assistant():
+                nonlocal ai_response_text, ai_success
+                try:
+                    print("🤖 AI Assistant ажиллаж байна...")
+                    retry_count = 0
+                    while retry_count <= MAX_AI_RETRIES:
+                        response = get_ai_response(thread_id, message_content, conv_id, verified_email, retry_count)
+                        
+                        # Хэрэв алдаатай хариулт биш бол амжилттай
+                        if not any(error_phrase in response for error_phrase in [
+                            "алдаа гарлаа", "хэт удаж байна", "олдсонгүй"
+                        ]):
+                            ai_response_text = response
+                            ai_success = True
+                            print(f"✅ AI Assistant амжилттай: {response[:50]}...")
+                            break
+                            
+                        retry_count += 1
+                        if retry_count <= MAX_AI_RETRIES:
+                            print(f"🔄 AI дахин оролдож байна... ({retry_count}/{MAX_AI_RETRIES})")
+                            time.sleep(2)
+                    
+                    if not ai_success:
+                        print("❌ AI Assistant бүх оролдлого бүтэлгүйтэв")
+                        
+                except Exception as e:
+                    print(f"❌ AI Assistant алдаа: {e}")
+            
+            # Хоёр системийг зэрэг ажиллуулах
+            rag_thread = threading.Thread(target=run_rag)
+            ai_thread = threading.Thread(target=run_ai_assistant)
+            
+            # Thread эхлүүлэх
+            rag_thread.start()
+            ai_thread.start()
+            
+            # Хоёуланг нь дуусахыг хүлээх (максимум 45 секунд)
+            rag_thread.join(timeout=30)
+            ai_thread.join(timeout=30)
+            
+            print(f"🔍 Үр дүн: RAG={rag_response['success']}, AI={ai_success}")
+            
+            # ========== ХАРИУЛТУУДЫГ НЭГТГЭХ ==========
+            final_response = ""
+            response_type = ""
+            
+            if rag_response["success"] and ai_success:
+                # Хоёулаа амжилттай бол нэгтгэх
+                print("🎯 Хоёр систем амжилттай - хариултуудыг нэгтгэж байна")
+                
+                final_response = f"📚 **Документаас олсон мэдээлэл:**\n{rag_response['answer']}\n\n"
+                final_response += f"🤖 **AI туслахын нэмэлт зөвлөгөө:**\n{ai_response_text}"
+                
+                # RAG sources нэмэх
+                if rag_response["sources"]:
+                    final_response += "\n\n📖 **Холбогдох документууд:**\n"
+                    for i, source in enumerate(rag_response["sources"], 1):
+                        title = source.get("title", "Документ")
+                        url = source.get("url", "")
+                        final_response += f"{i}. [{title}]({url})\n"
+                
+                response_type = "RAG + AI Assistant"
+                
+            elif rag_response["success"]:
+                # Зөвхөн RAG амжилттай
+                print("📚 Зөвхөн RAG амжилттай")
+                
+                final_response = rag_response["answer"]
+                
+                # RAG sources нэмэх
+                if rag_response["sources"]:
+                    final_response += "\n\n📚 **Холбогдох документууд:**\n"
+                    for i, source in enumerate(rag_response["sources"], 1):
+                        title = source.get("title", "Документ")
+                        url = source.get("url", "")
+                        final_response += f"{i}. [{title}]({url})\n"
+                
+                response_type = "RAG"
+                
+            elif ai_success:
+                # Зөвхөн AI Assistant амжилттай
+                print("🤖 Зөвхөн AI Assistant амжилттай")
+                final_response = ai_response_text
+                response_type = "AI Assistant"
+                
+            else:
+                # Хоёулаа бүтэлгүйтэв
+                print("❌ Хоёр систем бүтэлгүйтэв - ажилтанд хуваарилж байна")
+                
+                send_teams_notification(
+                    conv_id, 
+                    message_content, 
+                    verified_email, 
+                    "RAG болон AI Assistant хоёулаа бүтэлгүйтэв",
+                    None,
+                    thread_id
+                )
+                
+                final_response = (
+                    "🚨 Уучлаарай, техникийн асуудал гарлаа.\n\n"
+                    "Би таны асуултыг техникийн багт дамжуулаа. Удахгүй асуудлыг шийдэж, танд хариулт өгөх болно.\n\n"
+                    "🕐 Түр хүлээнэ үү..."
+                )
+                response_type = "Error - Escalated"
+            
+            # Typing indicator унтраах
+            stop_typing_indicator(conv_id)
+            
+            # ========== ХАРИУЛТ ИЛГЭЭХ ==========
+            # Chatwoot руу илгээх
+            send_to_chatwoot(conv_id, final_response)
+            print(f"✅ {response_type} хариулт илгээлээ: {final_response[:50]}...")
+            
+            # Teams мэдээлэх логик - зөвхөн шинэ асуудал эсвэл техникийн асуудал үед
+            try:
+                # Хэрэв хоёулаа амжилттай бол Teams-д мэдээлэх хэрэггүй
+                if not (rag_response["success"] and ai_success):
+                    # Escalation шаардлагатай эсэхийг шалгах
+                    should_escalate, escalation_reason = should_escalate_to_teams(thread_id, message_content)
+                    
+                    if should_escalate:
+                        # Teams мэдээлэх - GPT дүгнэлттэй
+                        send_teams_notification(
+                            conv_id, 
+                            message_content, 
+                            verified_email, 
+                            escalation_reason,
+                            None,  # ai_analysis-г функц дотор үүсгэнэ
+                            thread_id
+                        )
+                        print(f"📢 Teams GPT дүгнэлттэй мэдээлэл илгээлээ: {escalation_reason}")
+            except Exception as e:
+                print(f"❌ Teams мэдээлэх алдаа: {e}")
+                
+        except Exception as e:
+            print(f"💥 Delayed response алдаа: {e}")
+            # Алдаа гарвал typing indicator унтраах
+            stop_typing_indicator(conv_id)
+            # Алдааны мессеж илгээх
+            send_to_chatwoot(conv_id, "🚨 Уучлаарай, техникийн алдаа гарлаа. Дахин оролдоно уу.")
+    
+    # Background thread-д ажиллуулах
+    response_thread = threading.Thread(target=process_and_respond)
+    response_thread.daemon = True
+    response_thread.start()
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
