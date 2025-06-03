@@ -1,13 +1,13 @@
 flask
 requests
 openai
-pyjwt
+PyJWT
+python-dotenv
 beautifulsoup4
 lxml
-python-dotenv
 langchain
-langchain-community
 langchain-openai
+langchain-community
 faiss-cpu
 tiktoken
 gunicorn
