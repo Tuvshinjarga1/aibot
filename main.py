@@ -37,7 +37,7 @@ def send_to_chatwoot(conv_id: int, text: str) -> None:
     """
     Chatwoot руу outgoing (агентын) мессеж илгээх
     """
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/messages"
+    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/inbox/65547/{conv_id}"
     headers = {
         "api_access_token": CHATWOOT_API_KEY,
         "Content-Type": "application/json"
