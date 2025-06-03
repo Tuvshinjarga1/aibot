@@ -1,80 +1,58 @@
 import os
 import requests
 from flask import Flask, request, jsonify
-from dotenv import load_dotenv
 
-load_dotenv()
+# ── Орчны хувьсагчид ─────────────────────────────────────────────
+CHATWOOT_API_KEY = "XzyB8zXpdFNvtbAL3xdtid3r"  # <-- Таны admin token
+ACCOUNT_ID = "122224"
+CHATWOOT_BASE_URL = "https://app.chatwoot.com"
 
+# ── Flask App ───────────────────────────────────────────────────
 app = Flask(__name__)
 
-CHATWOOT_API_KEY = os.getenv("CHATWOOT_API_KEY")
-ACCOUNT_ID = os.getenv("ACCOUNT_ID")
-INBOX_ID = os.getenv("INBOX_ID")
-CHATWOOT_BASE_URL = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com")
-
-# 1. Contact үүсгэх
-def create_contact(name, email):
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts"
+# ── Chatwoot руу мессеж илгээх ─────────────────────────────────
+def send_to_chatwoot(conversation_id, message_text):
+    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/messages"
     headers = {
         "api_access_token": CHATWOOT_API_KEY,
         "Content-Type": "application/json"
     }
     payload = {
-        "name": name,
-        "email": email
+        "content": message_text,
+        "message_type": "outgoing",  # Агентын хариу
+        "private": False
     }
     response = requests.post(url, json=payload, headers=headers)
-    response.raise_for_status()
-    return response.json()["payload"]["contact"]["id"]
-
-# 2. Conversation үүсгэх
-def create_conversation(contact_id):
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
-    headers = {
-        "api_access_token": CHATWOOT_API_KEY,
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "source_id": contact_id,  # Contact ID
-        "inbox_id": int(INBOX_ID)
-    }
-    response = requests.post(url, json=payload, headers=headers)
-    response.raise_for_status()
-    return response.json()["payload"]["conversation"]["id"]
-
-# 3. Message илгээх
-def send_message(conv_id, message):
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/messages"
-    headers = {
-        "api_access_token": CHATWOOT_API_KEY,
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "content": message,
-        "message_type": "outgoing"
-    }
-    response = requests.post(url, json=payload, headers=headers)
+    print("📨 Response:", response.status_code)
+    print(response.text)
     response.raise_for_status()
 
-@app.route("/start", methods=["POST"])
-def start_conversation():
-    try:
-        data = request.json
-        name = data.get("name", "Guest")
-        email = data.get("email", "guest@example.com")
-        user_message = data.get("message", "Сайн байна уу?")
+# ── Webhook хүлээн авах ─────────────────────────────────────────
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.json or {}
+    
+    # Зөвхөн incoming мессеж
+    if data.get("message_type") != "incoming":
+        return jsonify({"status": "ignored"}), 200
 
-        contact_id = create_contact(name, email)
-        conv_id = create_conversation(contact_id)
-        send_message(conv_id, f"Сайн байна уу, {name}! Таны мессеж: {user_message}")
+    conv_id = data.get("conversation", {}).get("id")
+    content = data.get("content", "").strip()
 
-        return jsonify({"status": "conversation_started", "conversation_id": conv_id}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    if not conv_id or not content:
+        return jsonify({"status": "invalid"}), 400
 
+    # Ботын хариу
+    reply = f"Бот хариулт: \"{content}\""
+    send_to_chatwoot(conv_id, reply)
+
+    return jsonify({"status": "replied"}), 200
+
+# ── Health check ────────────────────────────────────────────────
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
 
+# ── App run ─────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
