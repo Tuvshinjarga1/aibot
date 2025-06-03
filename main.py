@@ -894,5 +894,22 @@ def debug_env():
         "VERIFICATION_URL_BASE": VERIFICATION_URL_BASE
     }
 
+@app.route("/test-chatwoot", methods=["GET"])
+def test_chatwoot():
+    try:
+        # 🔁 Ямар нэг ХҮЧИНТЭЙ conversation ID-г энд бичиж турш
+        test_conv_id = "65547"  # <-- энэ ID-г өөрийн inbox/conversation-оос авна уу
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{test_conv_id}"
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+
+        resp = requests.get(url, headers=headers)
+        return {
+            "status": resp.status_code,
+            "body": resp.text[:500]
+        }
+
+    except Exception as e:
+        return {"error": str(e)}, 500
+
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
