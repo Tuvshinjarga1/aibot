@@ -283,6 +283,11 @@ def send_verification_email(email, token):
     try:
         verification_url = f"{VERIFICATION_URL_BASE}/verify?token={token}"
         
+        print(f"📧 Имэйл илгээж байна: {email}")
+        print(f"🔗 Verification URL: {verification_url}")
+        print(f"📮 SMTP Server: {SMTP_SERVER}:{SMTP_PORT}")
+        print(f"👤 Sender Email: {SENDER_EMAIL}")
+        
         msg = MIMEMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = email
@@ -304,15 +309,33 @@ def send_verification_email(email, token):
         
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
+        print("🔌 SMTP серверт холбогдож байна...")
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
+        print("🔐 SMTP authentication хийж байна...")
         server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        print("📤 Имэйл илгээж байна...")
         server.send_message(msg)
         server.quit()
         
+        print(f"✅ Имэйл амжилттай илгээлээ: {email}")
         return True
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"❌ SMTP нэвтрэх алдаа: {e}")
+        print("💡 Gmail App Password зөв эсэхийг шалгана уу")
+        return False
+    except smtplib.SMTPRecipientsRefused as e:
+        print(f"❌ Хүлээн авагчийн имэйл буруу: {e}")
+        return False
+    except smtplib.SMTPServerDisconnected as e:
+        print(f"❌ SMTP сервер салсан: {e}")
+        return False
+    except smtplib.SMTPException as e:
+        print(f"❌ SMTP алдаа: {e}")
+        return False
     except Exception as e:
-        print(f"Имэйл илгээхэд алдаа: {e}")
+        print(f"❌ Имэйл илгээхэд алдаа: {e}")
+        print(f"❌ Алдааны төрөл: {type(e).__name__}")
         return False
 
 def get_contact(contact_id):
@@ -1049,8 +1072,30 @@ def health():
             "teams_webhook": TEAMS_WEBHOOK_URL is not None,
             "email_smtp": SENDER_EMAIL is not None and SENDER_PASSWORD is not None,
             "chatwoot_api": CHATWOOT_API_KEY is not None and ACCOUNT_ID is not None
+        },
+        "configuration": {
+            "smtp_server": f"{SMTP_SERVER}:{SMTP_PORT}",
+            "sender_email": SENDER_EMAIL if SENDER_EMAIL else "❌ Тохируулаагүй",
+            "sender_password_set": "✅ Тохируулсан" if SENDER_PASSWORD else "❌ Тохируулаагүй",
+            "verification_url_base": VERIFICATION_URL_BASE,
+            "jwt_secret_set": "✅ Тохируулсан" if JWT_SECRET and JWT_SECRET != "your-secret-key-here" else "❌ Default утга",
+            "chatwoot_base_url": CHATWOOT_BASE_URL,
+            "docs_base_url": DOCS_BASE_URL,
+            "vector_store_exists": os.path.exists(VECTOR_STORE_PATH)
         }
     }
+    
+    # Имэйл тохиргооны нарийвчилсан шалгалт
+    email_issues = []
+    if not SENDER_EMAIL:
+        email_issues.append("SENDER_EMAIL тохируулаагүй")
+    if not SENDER_PASSWORD:
+        email_issues.append("SENDER_PASSWORD тохируулаагүй")
+    if SMTP_SERVER == "smtp.gmail.com" and "@gmail.com" not in (SENDER_EMAIL or ""):
+        email_issues.append("Gmail SMTP ашиглаж байгаа ч Gmail хаяг биш")
+    
+    if email_issues:
+        status["email_issues"] = email_issues
     
     # Нийт статус шалгах
     all_ok = all(status["components"].values())
