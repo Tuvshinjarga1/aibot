@@ -111,15 +111,30 @@ def send_verification_email(email, token):
 def get_contact(contact_id):
     """Contact мэдээлэл авах"""
     try:
+        # URL болон параметрүүдийг шалгах
+        print(f"🔍 ACCOUNT_ID: '{ACCOUNT_ID}' (type: {type(ACCOUNT_ID)})")
+        print(f"🔍 contact_id: '{contact_id}' (type: {type(contact_id)})")
+        print(f"🔍 CHATWOOT_BASE_URL: '{CHATWOOT_BASE_URL}'")
+        
+        # URL үүсгэх
         url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/{contact_id}"
         headers = {"api_access_token": CHATWOOT_API_KEY}
         
         print(f"🔗 Get contact URL: {url}")
+        print(f"🔑 API Key дээд 10 тэмдэгт: {CHATWOOT_API_KEY[:10]}..." if CHATWOOT_API_KEY else "❌ API Key байхгүй")
+        print(f"📊 Headers: {headers}")
         
         resp = requests.get(url, headers=headers)
         
         print(f"📈 Get contact response status: {resp.status_code}")
-        print(f"📄 Get contact response text: {resp.text[:200]}...")
+        print(f"📄 Get contact response text: {resp.text[:500]}...")
+        
+        if resp.status_code == 401:
+            print("🚨 401 Unauthorized - API токен буруу эсвэл эрхгүй байна")
+            print("💡 Шалгах зүйлс:")
+            print("   1. Railway дээр CHATWOOT_API_KEY зөв тохируулсан эсэх")
+            print("   2. API токен Chatwoot дээр хүчинтэй эсэх")
+            print("   3. ACCOUNT_ID зөв эсэх")
         
         resp.raise_for_status()
         return resp.json()
@@ -128,6 +143,15 @@ def get_contact(contact_id):
         print(f"❌ Get contact HTTP алдаа: {e}")
         print(f"📊 Response status: {resp.status_code}")
         print(f"📄 Response text: {resp.text}")
+        
+        # 401 алдааны тохиолдолд илүү дэлгэрэнгүй мэдээлэл
+        if resp.status_code == 401:
+            print("\n🔧 401 алдаа шийдэх арга:")
+            print("1. Chatwoot → Settings → Integrations → API Access Tokens")
+            print("2. Шинэ API токен үүсгэх")
+            print("3. Railway дээр CHATWOOT_API_KEY хувьсагч шинэчлэх")
+            print("4. API токенд Contact read/write эрх байгаа эсэхийг шалгах")
+        
         raise e
     except Exception as e:
         print(f"💥 Get contact алдаа: {e}")
@@ -967,31 +991,73 @@ def debug_env():
 def test_chatwoot():
     """Chatwoot API холболтыг тест хийх"""
     try:
+        print("🧪 Chatwoot API тест эхэлж байна...")
+        
+        # Орчны хувьсагчдыг шалгах
+        print(f"🔍 CHATWOOT_BASE_URL: '{CHATWOOT_BASE_URL}'")
+        print(f"🔍 ACCOUNT_ID: '{ACCOUNT_ID}' (type: {type(ACCOUNT_ID)})")
+        print(f"🔍 API Key байгаа эсэх: {'YES' if CHATWOOT_API_KEY else 'NO'}")
+        print(f"🔍 API Key length: {len(CHATWOOT_API_KEY) if CHATWOOT_API_KEY else 0}")
+        
+        if not CHATWOOT_API_KEY:
+            return {
+                "status": "error", 
+                "message": "CHATWOOT_API_KEY орчны хувьсагч тохируулаагүй байна"
+            }, 400
+        
+        if not ACCOUNT_ID:
+            return {
+                "status": "error", 
+                "message": "ACCOUNT_ID орчны хувьсагч тохируулаагүй байна"
+            }, 400
+        
         # Энгийн API дуудлага хийж токен зөв эсэхийг шалгах
         url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
         headers = {"api_access_token": CHATWOOT_API_KEY}
         
         print(f"🔗 Test URL: {url}")
-        print(f"🔑 API Key: {CHATWOOT_API_KEY[:10]}..." if CHATWOOT_API_KEY else "❌ API Key бүр байхгүй")
-        print(f"📊 Account ID: {ACCOUNT_ID}")
+        print(f"🔑 API Key (first 10 chars): {CHATWOOT_API_KEY[:10]}...")
+        print(f"📊 Headers: {headers}")
         
         resp = requests.get(url, headers=headers)
         
         print(f"📈 Test response status: {resp.status_code}")
-        print(f"📄 Test response: {resp.text[:300]}...")
+        print(f"📄 Test response: {resp.text[:500]}...")
         
         if resp.status_code == 200:
-            return {"status": "success", "message": "Chatwoot API холболт амжилттай!"}, 200
+            return {
+                "status": "success", 
+                "message": "✅ Chatwoot API холболт амжилттай!",
+                "details": {
+                    "account_id": ACCOUNT_ID,
+                    "api_working": True,
+                    "response_preview": resp.text[:200]
+                }
+            }, 200
+        elif resp.status_code == 401:
+            return {
+                "status": "error", 
+                "message": "❌ 401 Unauthorized - API токен буруу эсвэл эрхгүй",
+                "suggestions": [
+                    "Chatwoot дээр шинэ API токен үүсгэх",
+                    "Railway дээр CHATWOOT_API_KEY хувьсагч шинэчлэх",
+                    "API токенд зайлшгүй эрхүүд байгаа эсэхийг шалгах"
+                ],
+                "response": resp.text[:500]
+            }, 401
         else:
             return {
                 "status": "error", 
-                "message": f"API алдаа: {resp.status_code}",
+                "message": f"❌ API алдаа: HTTP {resp.status_code}",
                 "response": resp.text[:500]
             }, resp.status_code
             
     except Exception as e:
         print(f"💥 Chatwoot test алдаа: {e}")
-        return {"status": "error", "message": f"Алдаа: {str(e)}"}, 500
+        return {
+            "status": "error", 
+            "message": f"❌ Тест хийхэд алдаа: {str(e)}"
+        }, 500
 
 def check_or_create_contact(contact_id, email):
     """Contact байгаа эсэхийг шалгаж, байхгүй бол шинээр үүсгэх"""
