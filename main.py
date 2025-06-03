@@ -4,6 +4,7 @@ import requests
 import re
 import jwt
 import smtplib
+import hashlib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
@@ -36,67 +37,259 @@ VERIFICATION_URL_BASE = os.environ.get("VERIFICATION_URL_BASE", "http://localhos
 # OpenAI клиент
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# Имэйл rate limiting буферы (санах ойд хадгалах)
+email_attempts = {}
+MAX_EMAIL_ATTEMPTS = 3  # 1 цагт дээд тал нь 3 удаа
+ATTEMPT_WINDOW = 3600   # 1 цаг (секундээр)
+
 def is_valid_email(email):
-    """Имэйл хаягийн форматыг шалгах"""
+    """Имэйл хаягийн форматыг шалгах - илүү нарийвчилсан"""
+    if not email or len(email) > 254:  # RFC 5321 стандартын дагуу
+        return False
+    
+    # Үндсэн regex шалгалт
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    return re.match(pattern, email) is not None
+    if not re.match(pattern, email):
+        return False
+    
+    # @ тэмдэг нэг байх ёстой
+    if email.count('@') != 1:
+        return False
+    
+    # Local ба domain хэсгийг тусгаарлах
+    local, domain = email.split('@')
+    
+    # Local хэсгийн урт шалгах (64 тэмдэгтээс илүүгүй)
+    if len(local) > 64:
+        return False
+    
+    # Domain хэсгийн урт шалгах
+    if len(domain) > 253:
+        return False
+    
+    return True
+
+def check_email_rate_limit(email):
+    """Имэйл илгээх давтамжийг шалгах"""
+    now = time.time()
+    email_hash = hashlib.md5(email.encode()).hexdigest()
+    
+    if email_hash in email_attempts:
+        # Хуучин оролдлогуудыг цэвэрлэх
+        email_attempts[email_hash] = [
+            timestamp for timestamp in email_attempts[email_hash] 
+            if now - timestamp < ATTEMPT_WINDOW
+        ]
+        
+        # Хэт олон оролдлого байгаа эсэхийг шалгах
+        if len(email_attempts[email_hash]) >= MAX_EMAIL_ATTEMPTS:
+            return False, f"Хэт олон оролдлого! {ATTEMPT_WINDOW//60} минутын дараа дахин оролдоно уу."
+    else:
+        email_attempts[email_hash] = []
+    
+    # Шинэ оролдлого нэмэх
+    email_attempts[email_hash].append(now)
+    return True, "OK"
 
 def generate_verification_token(email, conv_id, contact_id):
-    """Баталгаажуулах JWT токен үүсгэх"""
+    """Баталгаажуулах JWT токен үүсгэх - илүү хамгаалалттай"""
     payload = {
-        'email': email,
-        'conv_id': conv_id,
-        'contact_id': contact_id,
+        'email': email.lower().strip(),  # Email-г normalize хийх
+        'conv_id': str(conv_id),
+        'contact_id': str(contact_id),
+        'issued_at': datetime.utcnow().timestamp(),
         'exp': datetime.utcnow() + timedelta(hours=24)  # 24 цагийн дараа дуусна
     }
     return jwt.encode(payload, JWT_SECRET, algorithm='HS256')
 
 def verify_token(token):
-    """JWT токеныг шалгах"""
+    """JWT токеныг шалгах - илүү дэлгэрэнгүй error handling"""
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        
+        # Токений насыг дахин шалгах
+        if 'exp' in payload:
+            exp_time = payload['exp']
+            if isinstance(exp_time, datetime):
+                if datetime.utcnow() > exp_time:
+                    return None
+        
         return payload
     except jwt.ExpiredSignatureError:
+        print("❌ JWT токен хугацаа дууссан")
         return None
-    except jwt.InvalidTokenError:
+    except jwt.InvalidTokenError as e:
+        print(f"❌ JWT токен буруу: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ JWT токен шалгахад алдаа: {e}")
         return None
 
-def send_verification_email(email, token):
-    """Баталгаажуулах имэйл илгээх"""
+def test_email_connection():
+    """SMTP холболтыг тест хийх"""
     try:
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.quit()
+        return True, "SMTP холболт амжилттай"
+    except smtplib.SMTPAuthenticationError:
+        return False, "SMTP нэвтрэх нэр нууц үг буруу"
+    except smtplib.SMTPConnectError:
+        return False, f"SMTP сервертэй холбогдож чадсангүй: {SMTP_SERVER}:{SMTP_PORT}"
+    except Exception as e:
+        return False, f"SMTP холболтын алдаа: {str(e)}"
+
+def send_verification_email(email, token):
+    """Баталгаажуулах имэйл илгээх - HTML формат ашиглах"""
+    try:
+        # Rate limiting шалгах
+        can_send, message = check_email_rate_limit(email)
+        if not can_send:
+            print(f"❌ Rate limit: {message}")
+            return False, message
+        
+        # SMTP холболт тест хийх
+        connection_ok, connection_msg = test_email_connection()
+        if not connection_ok:
+            print(f"❌ SMTP холболт: {connection_msg}")
+            return False, connection_msg
+        
         verification_url = f"{VERIFICATION_URL_BASE}/verify?token={token}"
         
-        msg = MIMEMultipart()
+        msg = MIMEMultipart('alternative')
         msg['From'] = SENDER_EMAIL
         msg['To'] = email
-        msg['Subject'] = "Имэйл хаягаа баталгаажуулна уу"
+        msg['Subject'] = "🔐 Имэйл хаягаа баталгаажуулна уу"
         
-        body = f"""
-        Сайн байна уу!
+        # HTML агуулга
+        html_body = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Имэйл баталгаажуулалт</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 0; background-color: #f5f5f5; }}
+        .container {{ max-width: 600px; margin: 0 auto; background-color: white; }}
+        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; }}
+        .content {{ padding: 30px; }}
+        .verify-button {{ 
+            display: inline-block; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white; 
+            padding: 15px 30px; 
+            text-decoration: none; 
+            border-radius: 25px; 
+            font-weight: bold;
+            margin: 20px 0;
+            text-align: center;
+        }}
+        .verify-button:hover {{ opacity: 0.9; }}
+        .info-box {{ background-color: #e3f2fd; border-left: 4px solid #2196f3; padding: 15px; margin: 20px 0; }}
+        .warning-box {{ background-color: #fff3e0; border-left: 4px solid #ff9800; padding: 15px; margin: 20px 0; }}
+        .footer {{ background-color: #f8f9fa; padding: 20px; text-align: center; color: #666; font-size: 12px; }}
+        .logo {{ font-size: 24px; font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">🤖 ChatBot</div>
+            <h1>Имэйл баталгаажуулалт</h1>
+        </div>
         
-        Таны имэйл хаягийг баталгаажуулахын тулд доорх линк дээр дарна уу:
+        <div class="content">
+            <h2>👋 Сайн байна уу!</h2>
+            <p>Таны имэйл хаягийг баталгаажуулахын тулд доорх товчлуур дээр дарна уу:</p>
+            
+            <div style="text-align: center;">
+                <a href="{verification_url}" class="verify-button">
+                    ✅ Имэйлээ баталгаажуулах
+                </a>
+            </div>
+            
+            <div class="info-box">
+                <strong>💡 Мэдээлэл:</strong>
+                <ul>
+                    <li>Энэ линк зөвхөн 24 цагийн турш хүчинтэй</li>
+                    <li>Баталгаажуулсны дараа та chatbot-той харилцаж болно</li>
+                    <li>Аюулгүй байдлын үүднээс линкийг хуваалцахгүй байхыг зөвлөж байна</li>
+                </ul>
+            </div>
+            
+            <div class="warning-box">
+                <strong>⚠️ Анхаар:</strong> Хэрэв та энэ имэйлийг хүссэнгүй бол бидэнд мэдэгдэнэ үү эсвэл энэ имэйлийг устгаарай.
+            </div>
+            
+            <p>Хэрэв товчлуур ажиллахгүй байвал доорх линкийг хуулж, хөтчийн хаягийн талбарт буулгана уу:</p>
+            <p style="word-break: break-all; background-color: #f8f9fa; padding: 10px; border-radius: 5px; font-family: monospace;">
+                {verification_url}
+            </p>
+        </div>
         
-        {verification_url}
-        
-        Энэ линк 24 цагийн дараа хүчингүй болно.
-        
-        Хэрэв та биш бол бидэнд мэдэгдэнэ үү.
-        
-        Баярлалаа!
+        <div class="footer">
+            <p>Энэ автомат илгээгдсэн имэйл юм. Хариу бичих шаардлагагүй.</p>
+            <p>© 2024 ChatBot System. Бүх эрх хуулиар хамгаалагдсан.</p>
+        </div>
+    </div>
+</body>
+</html>
         """
         
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        # Text агуулга (HTML дэмжихгүй имэйл клиентэд)
+        text_body = f"""
+🔐 Имэйл баталгаажуулалт
+
+Сайн байна уу!
+
+Таны имэйл хаягийг баталгаажуулахын тулд доорх линк дээр дарна уу:
+
+{verification_url}
+
+⏰ Энэ линк 24 цагийн дараа хүчингүй болно.
+
+⚠️ Хэрэв та биш бол энэ имэйлийг устгана уу.
+
+---
+Энэ автомат илгээгдсэн имэйл юм.
+© 2024 ChatBot System
+        """
         
+        # MIME хэсгүүд нэмэх
+        text_part = MIMEText(text_body, 'plain', 'utf-8')
+        html_part = MIMEText(html_body, 'html', 'utf-8')
+        
+        msg.attach(text_part)
+        msg.attach(html_part)
+        
+        # Имэйл илгээх
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
         server.login(SENDER_EMAIL, SENDER_PASSWORD)
         server.send_message(msg)
         server.quit()
         
-        return True
+        print(f"✅ Имэйл амжилттай илгээлээ: {email}")
+        return True, "Амжилттай илгээлээ"
+        
+    except smtplib.SMTPAuthenticationError as e:
+        error_msg = "SMTP нэвтрэх алдаа - нэр нууц үг шалгана уу"
+        print(f"❌ {error_msg}: {e}")
+        return False, error_msg
+    except smtplib.SMTPRecipientsRefused as e:
+        error_msg = "Хүлээн авагчийн имэйл хаяг буруу"
+        print(f"❌ {error_msg}: {e}")
+        return False, error_msg
+    except smtplib.SMTPServerDisconnected as e:
+        error_msg = "SMTP сервертэй холболт тасарсан"
+        print(f"❌ {error_msg}: {e}")
+        return False, error_msg
     except Exception as e:
-        print(f"Имэйл илгээхэд алдаа: {e}")
-        return False
+        error_msg = f"Имэйл илгээхэд алдаа: {str(e)}"
+        print(f"❌ {error_msg}")
+        return False, error_msg
 
 def get_contact(contact_id):
     """Contact мэдээлэл авах"""
@@ -407,14 +600,54 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
 
 @app.route("/verify", methods=["GET"])
 def verify_email():
-    """Имэйл баталгаажуулах endpoint"""
+    """Имэйл баталгаажуулах endpoint - илүү сайжруулсан"""
     token = request.args.get('token')
     if not token:
-        return "Токен олдсонгүй!", 400
+        return render_template_string("""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Алдаа</title>
+            <meta charset="utf-8">
+            <style>
+                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background-color: #f5f5f5; }
+                .error { color: #d32f2f; font-size: 24px; margin: 20px 0; }
+                .info { color: #666; font-size: 16px; }
+                .container { max-width: 500px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="error">❌ Токен олдсонгүй!</div>
+                <div class="info">Баталгаажуулах линк буруу байна.</div>
+            </div>
+        </body>
+        </html>
+        """), 400
     
     payload = verify_token(token)
     if not payload:
-        return "Токен хүчингүй эсвэл хугацаа дууссан!", 400
+        return render_template_string("""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Токен хүчингүй</title>
+            <meta charset="utf-8">
+            <style>
+                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background-color: #f5f5f5; }
+                .error { color: #d32f2f; font-size: 24px; margin: 20px 0; }
+                .info { color: #666; font-size: 16px; }
+                .container { max-width: 500px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="error">⏰ Токен хүчингүй!</div>
+                <div class="info">Токений хугацаа дууссан эсвэл буруу байна.<br>Шинэ баталгаажуулах линк хүсээд имэйлээ дахин бичнэ үү.</div>
+            </div>
+        </body>
+        </html>
+        """), 400
     
     try:
         # Contact level дээр email_verified = true гэж тэмдэглэх
@@ -422,44 +655,147 @@ def verify_email():
         contact_id = payload['contact_id']
         email = payload['email']
         
+        print(f"✅ Имэйл баталгаажуулалт: {email} (Contact: {contact_id}, Conv: {conv_id})")
+        
         # Contact дээр баталгаажуулалтын мэдээлэл хадгалах
-        update_contact(contact_id, {
-            "email_verified": "1",  # Checkbox type-д string "true" ашиглах
+        verification_data = {
+            "email_verified": "1",  # Checkbox type-д string "1" ашиглах
             "verified_email": email,
-            "verification_date": datetime.utcnow().isoformat()
-        })
+            "verification_date": datetime.utcnow().isoformat(),
+            "verification_method": "email_link"
+        }
+        
+        update_contact(contact_id, verification_data)
+        print(f"✅ Contact {contact_id} шинэчлэлээ")
         
         # Conversation дээр thread мэдээлэл хадгалах (thread нь conversation specific)
         thread_key = f"openai_thread_{contact_id}"
         update_conversation(conv_id, {
-            thread_key: None  # Шинэ thread эхлүүлэх
+            thread_key: None,  # Шинэ thread эхлүүлэх
+            "last_verification": datetime.utcnow().isoformat()
         })
+        print(f"✅ Conversation {conv_id} шинэчлэлээ")
         
         # Баталгаажуулах мессеж илгээх
-        send_to_chatwoot(conv_id, f"✅ Таны имэйл хаяг ({email}) амжилттай баталгаажлаа! Одоо та chatbot-той харилцаж болно.")
+        success_message = (
+            f"🎉 Баярлалаа! Таны имэйл хаяг ({email}) амжилттай баталгаажлаа!\n\n"
+            "✅ Одоо та chatbot-той бүрэн харилцаж болно.\n"
+            "💬 Асуулт, хүсэлтээ бичээд илгээнэ үү."
+        )
+        send_to_chatwoot(conv_id, success_message)
+        print(f"✅ Chatwoot-д амжилтын мессеж илгээлээ")
         
         return render_template_string("""
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Имэйл баталгаажлаа</title>
+            <title>Амжилттай баталгаажлаа</title>
             <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <style>
-                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-                .success { color: green; font-size: 24px; margin: 20px 0; }
-                .info { color: #666; font-size: 16px; }
+                body { 
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                    margin: 0; 
+                    padding: 0; 
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }
+                .container { 
+                    max-width: 500px; 
+                    background: white; 
+                    padding: 40px; 
+                    border-radius: 15px; 
+                    box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+                    text-align: center;
+                }
+                .success { 
+                    color: #4caf50; 
+                    font-size: 28px; 
+                    margin: 20px 0; 
+                    font-weight: bold;
+                }
+                .info { 
+                    color: #333; 
+                    font-size: 16px; 
+                    line-height: 1.6;
+                    margin: 20px 0;
+                }
+                .email { 
+                    background-color: #e8f5e8; 
+                    color: #2e7d32; 
+                    padding: 10px; 
+                    border-radius: 8px; 
+                    font-weight: bold;
+                    margin: 15px 0;
+                }
+                .next-steps {
+                    background-color: #f0f7ff;
+                    border-left: 4px solid #2196f3;
+                    padding: 15px;
+                    margin: 20px 0;
+                    text-align: left;
+                }
+                .footer {
+                    margin-top: 30px;
+                    padding-top: 20px;
+                    border-top: 1px solid #eee;
+                    color: #666;
+                    font-size: 14px;
+                }
             </style>
         </head>
         <body>
-            <div class="success">✅ Амжилттай баталгаажлаа!</div>
-            <div class="info">Таны имэйл хаяг ({{ email }}) баталгаажлаа.<br>Одоо та chatbot-тойгоо харилцаж болно.</div>
+            <div class="container">
+                <div class="success">🎉 Амжилттай баталгаажлаа!</div>
+                <div class="info">
+                    Таны имэйл хаяг амжилттай баталгаажлаа:
+                    <div class="email">{{ email }}</div>
+                </div>
+                
+                <div class="next-steps">
+                    <strong>📱 Дараагийн алхам:</strong>
+                    <ul>
+                        <li>Чат цонх руу буцаж очно уу</li>
+                        <li>Асуулт, хүсэлтээ бичээд илгээнэ үү</li>
+                        <li>Chatbot таныг танин мэдэж, тусалж эхэлнэ</li>
+                    </ul>
+                </div>
+                
+                <div class="footer">
+                    <p>✅ Баталгаажуулалт: {{ verification_time }}</p>
+                    <p>🤖 ChatBot System</p>
+                </div>
+            </div>
         </body>
         </html>
-        """, email=email)
+        """, email=email, verification_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         
     except Exception as e:
-        print(f"Verification алдаа: {e}")
-        return "Баталгаажуулахад алдаа гарлаа!", 500
+        print(f"❌ Verification алдаа: {e}")
+        return render_template_string("""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Алдаа гарлаа</title>
+            <meta charset="utf-8">
+            <style>
+                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background-color: #f5f5f5; }
+                .error { color: #d32f2f; font-size: 24px; margin: 20px 0; }
+                .info { color: #666; font-size: 16px; }
+                .container { max-width: 500px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="error">❌ Алдаа гарлаа!</div>
+                <div class="info">Баталгаажуулахад техникийн алдаа гарлаа.<br>Дахин оролдоно уу.</div>
+            </div>
+        </body>
+        </html>
+        """), 500
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
