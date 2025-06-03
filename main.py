@@ -8,8 +8,8 @@ import os
 load_dotenv()
 
 # Орчны хувьсагчуудаас утгууд авах
-CHATWOOT_API_TOKEN = os.getenv("CHATWOOT_API_TOKEN")
-CHATWOOT_BASE_URL = os.getenv("CHATWOOT_BASE_URL")
+CHATWOOT_API_KEY = os.getenv("CHATWOOT_API_KEY")
+CHATWOOT_BASE_URL = "https://app.chatwoot.com"
 ACCOUNT_ID = os.getenv("CHATWOOT_ACCOUNT_ID")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
