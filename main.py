@@ -1,34 +1,33 @@
 from flask import Flask, request, jsonify
 import requests
-import openai
+from openai import OpenAI
 from dotenv import load_dotenv
 import os
 
-# .env ачааллах
 load_dotenv()
 
-# Орчны хувьсагчуудаас утгууд авах
+# Chatwoot configs
 CHATWOOT_API_KEY = os.getenv("CHATWOOT_API_KEY")
 CHATWOOT_BASE_URL = "https://app.chatwoot.com"
 ACCOUNT_ID = os.getenv("CHATWOOT_ACCOUNT_ID")
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-openai.api_key = OPENAI_API_KEY
+# OpenAI Client
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app = Flask(__name__)
 
 def call_ai_model(message: str) -> str:
-    res = openai.ChatCompletion.create(
-        model="gpt-4",  # эсвэл "gpt-3.5-turbo"
+    chat_completion = client.chat.completions.create(
+        model="gpt-4",
         messages=[{"role": "user", "content": message}]
     )
-    return res.choices[0].message.content.strip()
+    return chat_completion.choices[0].message.content.strip()
 
 def send_reply(conversation_id, content):
     url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conversation_id}/messages"
     headers = {
         "Content-Type": "application/json",
-        "api_access_token": CHATWOOT_API_TOKEN
+        "api_access_token": CHATWOOT_API_KEY
     }
     payload = {
         "content": content,
@@ -42,8 +41,9 @@ def webhook():
     message = data.get("content")
     conversation_id = data["conversation"]["id"]
 
-    ai_reply = call_ai_model(message)
-    send_reply(conversation_id, ai_reply)
+    if message:
+        ai_reply = call_ai_model(message)
+        send_reply(conversation_id, ai_reply)
 
     return jsonify({"status": "ok"})
 
