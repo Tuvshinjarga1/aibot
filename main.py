@@ -283,13 +283,21 @@ def generate_verification_token(email, conv_id, contact_id):
 def verify_token(token):
     """JWT токеныг шалгах"""
     try:
+        logger.info(f"Verifying JWT token: {token[:20]}...")
         payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        logger.info("JWT token verification successful")
         return payload
     except jwt.ExpiredSignatureError:
+        logger.warning("JWT token has expired")
         print("❌ Токеның хугацаа дууссан")
         return None
-    except jwt.InvalidTokenError:
-        print("❌ Буруу токен")
+    except jwt.InvalidTokenError as e:
+        logger.warning(f"Invalid JWT token: {str(e)}")
+        print(f"❌ Буруу токен: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error verifying JWT token: {str(e)}")
+        print(f"❌ Токен шалгахад алдаа: {str(e)}")
         return None
 
 def send_verification_email(email, token):
@@ -346,12 +354,30 @@ def get_contact(contact_id):
 
 def update_contact(contact_id, custom_attributes):
     """Contact дээр custom attribute шинэчлэх"""
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/{contact_id}"
-    headers = {"api_access_token": CHATWOOT_API_KEY}
-    payload = {"custom_attributes": custom_attributes}
-    response = requests.put(url, json=payload, headers=headers)
-    response.raise_for_status()
-    return response.json()
+    try:
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/{contact_id}"
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        payload = {"custom_attributes": custom_attributes}
+        
+        logger.info(f"Updating contact {contact_id} with attributes: {custom_attributes}")
+        response = requests.put(url, json=payload, headers=headers, timeout=30)
+        
+        if response.status_code != 200:
+            logger.error(f"Chatwoot API error: {response.status_code} - {response.text}")
+            
+        response.raise_for_status()
+        logger.info("Contact updated successfully")
+        return response.json()
+        
+    except requests.exceptions.Timeout:
+        logger.error("Timeout updating contact")
+        raise
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request error updating contact: {str(e)}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error updating contact: {str(e)}")
+        raise
 
 def get_conversation(conv_id):
     """Conversation мэдээлэл авах"""
@@ -372,11 +398,30 @@ def update_conversation(conv_id, custom_attributes):
 
 def send_to_chatwoot(conv_id, text):
     """Chatwoot руу мессеж илгээх"""
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/messages"
-    headers = {"api_access_token": CHATWOOT_API_KEY}
-    payload = {"content": text, "message_type": "outgoing"}
-    r = requests.post(url, json=payload, headers=headers)
-    r.raise_for_status()
+    try:
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/messages"
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        payload = {"content": text, "message_type": "outgoing"}
+        
+        logger.info(f"Sending message to conversation {conv_id}: {text[:50]}...")
+        r = requests.post(url, json=payload, headers=headers, timeout=30)
+        
+        if r.status_code != 200:
+            logger.error(f"Chatwoot API error: {r.status_code} - {r.text}")
+            
+        r.raise_for_status()
+        logger.info("Message sent successfully")
+        return r.json()
+        
+    except requests.exceptions.Timeout:
+        logger.error("Timeout sending message to Chatwoot")
+        raise
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request error sending message: {str(e)}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error sending message: {str(e)}")
+        raise
 
 def get_ai_response(thread_id, message_content):
     """OpenAI Assistant-ээс энгийн хариулт авах"""
@@ -439,30 +484,71 @@ def get_ai_response(thread_id, message_content):
 @app.route("/verify", methods=["GET"])
 def verify_email():
     """Имэйл баталгаажуулах endpoint"""
-    token = request.args.get('token')
-    if not token:
-        return "Токен олдсонгүй!", 400
-    
-    payload = verify_token(token)
-    if not payload:
-        return "Токен хүчингүй эсвэл хугацаа дууссан!", 400
-    
     try:
-        # Contact level дээр email_verified = true гэж тэмдэглэх
-        conv_id = payload['conv_id']
-        contact_id = payload['contact_id']
-        email = payload['email']
+        token = request.args.get('token')
+        if not token:
+            logger.warning("Token parameter missing from verify request")
+            return "Токен олдсонгүй!", 400
         
-        # Contact дээр баталгаажуулалтын мэдээлэл хадгалах
-        update_contact(contact_id, {
-            "email_verified": "true",
-            "verified_email": email,
-            "verification_date": datetime.utcnow().isoformat()
-        })
+        logger.info(f"Attempting to verify email with token: {token[:20]}...")
         
-        # Баталгаажуулах мессеж илгээх
-        send_to_chatwoot(conv_id, f"✅ Таны имэйл хаяг ({email}) амжилттай баталгаажлаа! Одоо та chatbot-той харилцаж болно.")
+        payload = verify_token(token)
+        if not payload:
+            logger.warning("Token verification failed - invalid or expired")
+            return "Токен хүчингүй эсвэл хугацаа дууссан!", 400
         
+        # Token-ийн дата шалгах
+        conv_id = payload.get('conv_id')
+        contact_id = payload.get('contact_id')
+        email = payload.get('email')
+        
+        if not all([conv_id, contact_id, email]):
+            logger.error(f"Invalid token payload: conv_id={conv_id}, contact_id={contact_id}, email={email}")
+            return "Токен буруу форматтай байна!", 400
+        
+        logger.info(f"Token verified for email: {email}, conv_id: {conv_id}, contact_id: {contact_id}")
+        
+        # Chatwoot API key шалгах
+        if not CHATWOOT_API_KEY or not ACCOUNT_ID:
+            logger.error("Chatwoot configuration missing")
+            return "Системийн тохиргооны алдаа. Техникийн дэмжлэгт хандана уу.", 500
+        
+        try:
+            # Contact дээр баталгаажуулалтын мэдээлэл хадгалах
+            logger.info(f"Updating contact {contact_id} verification status")
+            update_contact(contact_id, {
+                "email_verified": "true",
+                "verified_email": email,
+                "verification_date": datetime.utcnow().isoformat()
+            })
+            logger.info("Contact updated successfully")
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Chatwoot API error when updating contact: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response status: {e.response.status_code}, Response body: {e.response.text}")
+            # Continue execution even if contact update fails
+        except Exception as e:
+            logger.error(f"Unexpected error updating contact: {e}")
+            # Continue execution
+        
+        try:
+            # Баталгаажуулах мессеж илгээх
+            logger.info(f"Sending verification success message to conversation {conv_id}")
+            send_to_chatwoot(conv_id, f"✅ Таны имэйл хаяг ({email}) амжилттай баталгаажлаа! Одоо та chatbot-той харилцаж болно.")
+            logger.info("Verification message sent successfully")
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Chatwoot API error when sending message: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response status: {e.response.status_code}, Response body: {e.response.text}")
+            # Continue to show success page even if message fails
+        except Exception as e:
+            logger.error(f"Unexpected error sending message: {e}")
+            # Continue to show success page
+        
+        # Амжилттай баталгаажуулалтын хуудас харуулах
+        logger.info("Displaying verification success page")
         return render_template_string("""
         <!DOCTYPE html>
         <html>
@@ -487,8 +573,8 @@ def verify_email():
         """, email=email)
         
     except Exception as e:
-        print(f"Verification алдаа: {e}")
-        return "Баталгаажуулахад алдаа гарлаа!", 500
+        logger.error(f"Verification endpoint error: {str(e)}", exc_info=True)
+        return f"Баталгаажуулахад алдаа гарлаа: {str(e)}", 500
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -665,6 +751,7 @@ def home():
                 <h3>📋 Ашиглах заавар:</h3>
                 <p><strong>Webhook URL:</strong> <code>{{ request.url_root }}webhook</code></p>
                 <p><strong>Health Check:</strong> <code>{{ request.url_root }}health</code></p>
+                <p><strong>Системийн тест:</strong> <code>{{ request.url_root }}test</code></p>
                 <p><strong>Имэйл баталгаажуулалт:</strong> <code>{{ request.url_root }}verify?token=...</code></p>
             </div>
             
@@ -680,6 +767,69 @@ def home():
     </body>
     </html>
     """, **health().get_json())
+
+@app.route("/test", methods=["GET"])
+def test_system():
+    """Системийн үндсэн функцуудыг тест хийх"""
+    results = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "tests": {}
+    }
+    
+    # JWT тест
+    try:
+        test_payload = {
+            'email': 'test@example.com',
+            'conv_id': 123,
+            'contact_id': 456,
+            'exp': datetime.utcnow() + timedelta(hours=1)
+        }
+        test_token = jwt.encode(test_payload, JWT_SECRET, algorithm='HS256')
+        decoded = verify_token(test_token)
+        results["tests"]["jwt"] = {
+            "status": "✅ Амжилттай" if decoded else "❌ Алдаа",
+            "details": "JWT токен үүсгэх/шалгах" 
+        }
+    except Exception as e:
+        results["tests"]["jwt"] = {
+            "status": "❌ Алдаа", 
+            "details": f"JWT алдаа: {str(e)}"
+        }
+    
+    # Environment variables тест  
+    env_vars = {
+        "CHATWOOT_API_KEY": bool(CHATWOOT_API_KEY),
+        "ACCOUNT_ID": bool(ACCOUNT_ID),
+        "OPENAI_API_KEY": bool(OPENAI_API_KEY),
+        "JWT_SECRET": bool(JWT_SECRET)
+    }
+    results["tests"]["environment"] = {
+        "status": "✅ Амжилттай" if all(env_vars.values()) else "⚠️ Дутуу",
+        "details": env_vars
+    }
+    
+    # Chatwoot API тест (хэрэв API key байвал)
+    if CHATWOOT_API_KEY and ACCOUNT_ID:
+        try:
+            url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}"
+            headers = {"api_access_token": CHATWOOT_API_KEY}
+            response = requests.get(url, headers=headers, timeout=10)
+            results["tests"]["chatwoot"] = {
+                "status": "✅ Амжилттай" if response.status_code == 200 else f"❌ Алдаа ({response.status_code})",
+                "details": f"Chatwoot API холболт - Account: {ACCOUNT_ID}"
+            }
+        except Exception as e:
+            results["tests"]["chatwoot"] = {
+                "status": "❌ Алдаа",
+                "details": f"Chatwoot API алдаа: {str(e)}"
+            }
+    else:
+        results["tests"]["chatwoot"] = {
+            "status": "⚠️ Тохируулаагүй",
+            "details": "Chatwoot API key эсвэл Account ID дутуу"
+        }
+    
+    return jsonify(results)
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)
