@@ -47,8 +47,11 @@ VECTOR_STORE_PATH = "docs_faiss_index"
 # Email тохиргоо
 SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SENDER_EMAIL = os.environ["SENDER_EMAIL"]
-SENDER_PASSWORD = os.environ["SENDER_PASSWORD"]
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "")
+SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD", "")
+
+# Имэйл баталгаажуулалт идэвхтэй эсэхийг шалгах
+EMAIL_VERIFICATION_ENABLED = bool(SENDER_EMAIL and SENDER_PASSWORD)
 
 # Microsoft Teams тохиргоо
 TEAMS_WEBHOOK_URL = os.environ.get("TEAMS_WEBHOOK_URL")
@@ -60,6 +63,14 @@ VERIFICATION_URL_BASE = os.environ.get("VERIFICATION_URL_BASE", "http://localhos
 
 # OpenAI клиент
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Debug мэдээлэл хэвлэх
+print(f"🔧 Имэйл баталгаажуулалт: {'Идэвхтэй' if EMAIL_VERIFICATION_ENABLED else 'Идэвхгүй'}")
+if EMAIL_VERIFICATION_ENABLED:
+    print(f"📧 SMTP Server: {SMTP_SERVER}:{SMTP_PORT}")
+    print(f"📧 Sender Email: {SENDER_EMAIL}")
+else:
+    print("⚠️ SENDER_EMAIL эсвэл SENDER_PASSWORD тохируулаагүй байна")
 
 # =============== RAG СИСТЕМИЙН ФУНКЦУУД ===============
 
@@ -281,6 +292,11 @@ def verify_token(token):
 def send_verification_email(email, token):
     """Баталгаажуулах имэйл илгээх"""
     try:
+        # Имэйл тохиргоо шалгах
+        if not EMAIL_VERIFICATION_ENABLED:
+            print("❌ Имэйл баталгаажуулалт идэвхгүй байна")
+            return False
+            
         verification_url = f"{VERIFICATION_URL_BASE}/verify?token={token}"
         
         msg = MIMEMultipart()
@@ -304,15 +320,29 @@ def send_verification_email(email, token):
         
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
+        print(f"📧 SMTP серверт холбогдож байна: {SMTP_SERVER}:{SMTP_PORT}")
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
+        
+        print(f"📧 Нэвтэрч байна: {SENDER_EMAIL}")
         server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        
+        print(f"📧 Имэйл илгээж байна: {email}")
         server.send_message(msg)
         server.quit()
         
+        print(f"✅ Имэйл амжилттай илгээлээ: {email}")
         return True
+        
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"❌ SMTP нэвтрэх алдаа: {e}")
+        print("💡 Gmail App Password эсвэл OAuth2 ашиглах хэрэгтэй байж магадгүй")
+        return False
+    except smtplib.SMTPException as e:
+        print(f"❌ SMTP алдаа: {e}")
+        return False
     except Exception as e:
-        print(f"Имэйл илгээхэд алдаа: {e}")
+        print(f"❌ Имэйл илгээхэд ерөнхий алдаа: {e}")
         return False
 
 def get_contact(contact_id):
@@ -757,47 +787,40 @@ def webhook():
         # ========== БАТАЛГААЖУУЛАЛТ ШАЛГАХ ==========
         print("🔍 Баталгаажуулалт шалгаж байна...")
         
-        # Contact-ийн custom attributes авах (webhook-ээс шууд)
-        is_verified = False
-        verified_email = ""
-        
-        # Webhook дотор contact мэдээлэл байгаа эсэхийг шалгах
-        if "conversation" in data and "meta" in data["conversation"] and "sender" in data["conversation"]["meta"]:
-            sender_meta = data["conversation"]["meta"]["sender"]
-            if "custom_attributes" in sender_meta:
-                contact_attrs = sender_meta["custom_attributes"]
-                email_verified_value = contact_attrs.get("email_verified", "")
-                verified_email = contact_attrs.get("verified_email", "")
-                
-                # Баталгаажуулалт шалгах
-                is_verified = str(email_verified_value).lower() in ["true", "1", "yes"]
-                
-                print(f"📊 Webhook-ээс авсан: email_verified='{email_verified_value}', verified_email='{verified_email}'")
-                print(f"✅ Is verified: {is_verified}")
-        
-        # Хэрэв webhook дээр байхгүй бол API-аар дахин шалгах
-        if not is_verified:
-            print("🔍 API-аар дахин шалгаж байна...")
+        # Хэрэв имэйл баталгаажуулалт идэвхгүй бол шууд үргэлжлүүлэх
+        if not EMAIL_VERIFICATION_ENABLED:
+            print("⚠️ Имэйл баталгаажуулалт идэвхгүй - шууд AI руу дамжуулж байна")
+            is_verified = True
+            verified_email = "no-verification@example.com"
+        else:
+            # Contact-ийн баталгаажуулалт шалгах
+            is_verified = False
+            verified_email = ""
+            
+            # API-аар contact мэдээлэл авах
             try:
+                print(f"🔍 Contact {contact_id}-ийн мэдээлэл авч байна...")
                 contact = get_contact(contact_id)
                 contact_attrs = contact.get("custom_attributes", {})
                 email_verified_value = contact_attrs.get("email_verified", "")
                 verified_email = contact_attrs.get("verified_email", "")
                 
                 is_verified = str(email_verified_value).lower() in ["true", "1", "yes"]
-                print(f"📊 API-аас авсан: email_verified='{email_verified_value}', verified_email='{verified_email}'")
-                print(f"✅ Is verified: {is_verified}")
+                
+                print(f"📊 Contact мэдээлэл: email_verified='{email_verified_value}', verified_email='{verified_email}'")
+                print(f"✅ Баталгаажуулсан эсэх: {is_verified}")
+                
             except Exception as e:
-                print(f"❌ API алдаа: {e}")
+                print(f"❌ Contact мэдээлэл авахад алдаа: {e}")
                 is_verified = False
 
         # ========== БАТАЛГААЖУУЛАЛТЫН ҮЙЛДЭЛ ==========
-        if not is_verified:
+        if not is_verified and EMAIL_VERIFICATION_ENABLED:
             print("🚫 Баталгаажуулаагүй - имэйл шаардаж байна")
             
             # Имэйл хаяг шалгах
             if is_valid_email(message_content):
-                print(f"📧 Зөв имэйл: {message_content}")
+                print(f"📧 Зөв имэйл хүлээн авлаа: {message_content}")
                 
                 # Баталгаажуулах токен үүсгэх
                 token = generate_verification_token(message_content, conv_id, contact_id)
@@ -808,14 +831,21 @@ def webhook():
                         f"📧 Таны имэйл хаяг ({message_content}) рүү баталгаажуулах линк илгээлээ.\n\n"
                         "Имэйлээ шалгаад линк дээр дарна уу. Линк 24 цагийн дараа хүчингүй болно.\n\n"
                         "⚠️ Spam фолдерыг шалгахаа мартуузай!")
-                    print("✅ Имэйл амжилттай илгээлээ")
+                    print("✅ Баталгаажуулах имэйл илгээлээ")
                 else:
-                    send_to_chatwoot(conv_id, "❌ Имэйл илгээхэд алдаа гарлаа. Дахин оролдоно уу.")
-                    print("❌ Имэйл илгээхэд алдаа")
+                    send_to_chatwoot(conv_id, 
+                        "❌ Имэйл илгээхэд алдаа гарлаа.\n\n"
+                        "Дараах шалтгаанууд байж болно:\n"
+                        "• Имэйл серверийн тохиргоо буруу\n"
+                        "• Интернет холболт муу\n"
+                        "• Gmail App Password шаардлагатай\n\n"
+                        "Техникийн дэмжлэгт хандана уу.")
+                    print("❌ Имэйл илгээхэд алдаа гарлаа")
             else:
                 print(f"❌ Буруу имэйл формат: '{message_content}'")
                 send_to_chatwoot(conv_id, 
-                    "👋 Сайн байна уу! Chatbot ашиглахын тулд эхлээд имэйл хаягаа баталгаажуулна уу.\n\n"
+                    "👋 Сайн байна уу! \n\n"
+                    f"💡 Имэйл баталгаажуулалт {'идэвхтэй' if EMAIL_VERIFICATION_ENABLED else 'идэвхгүй'} байна.\n\n"
                     "📧 Зөв имэйл хаягаа бичээд илгээнэ үү.\n"
                     "Жишээ: example@gmail.com")
             
