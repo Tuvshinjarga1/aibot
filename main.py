@@ -105,6 +105,7 @@ def create_or_update_contact(email_or_name: str) -> int:
     return new_contact["id"]
 
 # ── Flask Routes ────────────────────────────────────────────────────────────────
+
 @app.route("/webhook", methods=["POST"])
 def webhook_handler():
     """
