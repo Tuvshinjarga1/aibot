@@ -110,10 +110,28 @@ def send_verification_email(email, token):
 
 def get_contact(contact_id):
     """Contact мэдээлэл авах"""
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/{contact_id}"
-    resp = requests.get(url, headers={"api_access_token": CHATWOOT_API_KEY})
-    resp.raise_for_status()
-    return resp.json()
+    try:
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/{contact_id}"
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        
+        print(f"🔗 Get contact URL: {url}")
+        
+        resp = requests.get(url, headers=headers)
+        
+        print(f"📈 Get contact response status: {resp.status_code}")
+        print(f"📄 Get contact response text: {resp.text[:200]}...")
+        
+        resp.raise_for_status()
+        return resp.json()
+        
+    except requests.exceptions.HTTPError as e:
+        print(f"❌ Get contact HTTP алдаа: {e}")
+        print(f"📊 Response status: {resp.status_code}")
+        print(f"📄 Response text: {resp.text}")
+        raise e
+    except Exception as e:
+        print(f"💥 Get contact алдаа: {e}")
+        raise e
 
 def update_contact(contact_id, attrs):
     """Contact-ийн custom attributes шинэчлэх"""
@@ -145,10 +163,28 @@ def update_contact(contact_id, attrs):
 
 def get_conversation(conv_id):
     """Conversation мэдээлэл авах"""
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}"
-    resp = requests.get(url, headers={"api_access_token": CHATWOOT_API_KEY})
-    resp.raise_for_status()
-    return resp.json()
+    try:
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}"
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        
+        print(f"🔗 Get conversation URL: {url}")
+        
+        resp = requests.get(url, headers=headers)
+        
+        print(f"📈 Get conversation response status: {resp.status_code}")
+        print(f"📄 Get conversation response text: {resp.text[:200]}...")
+        
+        resp.raise_for_status()
+        return resp.json()
+        
+    except requests.exceptions.HTTPError as e:
+        print(f"❌ Get conversation HTTP алдаа: {e}")
+        print(f"📊 Response status: {resp.status_code}")
+        print(f"📄 Response text: {resp.text}")
+        raise e
+    except Exception as e:
+        print(f"💥 Get conversation алдаа: {e}")
+        raise e
 
 def update_conversation(conv_id, attrs):
     """Conversation-ийн custom attributes шинэчлэх"""
@@ -503,6 +539,19 @@ def verify_email():
         
         print(f"📝 Conv ID: {conv_id}, Contact ID: {contact_id}, Email: {email}")
         
+        # Contact байгаа эсэхийг шалгаж, байхгүй бол үүсгэх
+        print("👤 Contact байгаа эсэхийг шалгаж байна...")
+        try:
+            contact_result = check_or_create_contact(contact_id, email)
+            # Хэрэв шинэ contact үүсгэсэн бол ID-г шинэчлэх
+            if contact_result.get('payload', {}).get('id') != contact_id:
+                new_contact_id = contact_result.get('payload', {}).get('id')
+                print(f"🔄 Contact ID шинэчлэгдлээ: {contact_id} → {new_contact_id}")
+                contact_id = new_contact_id
+        except Exception as contact_error:
+            print(f"❌ Contact шалгах/үүсгэхэд алдаа: {contact_error}")
+            return f"Contact шалгахад алдаа гарлаа: {str(contact_error)}", 500
+        
         # Contact дээр баталгаажуулалтын мэдээлэл хадгалах
         print("📞 Contact update хийж байна...")
         update_result = update_contact(contact_id, {
@@ -511,6 +560,26 @@ def verify_email():
             "verification_date": datetime.utcnow().isoformat()
         })
         print(f"✅ Contact update result: {update_result}")
+        
+        # Conversation байгаа эсэхийг шалгаж, байхгүй бол үүсгэх
+        print("💬 Conversation байгаа эсэхийг шалгаж байна...")
+        try:
+            conv_result = get_conversation(conv_id)
+            print(f"✅ Conversation олдлоо: {conv_result.get('id')}")
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                print(f"❌ Conversation {conv_id} олдсонгүй, шинээр үүсгэж байна...")
+                try:
+                    new_conv_result = create_conversation_for_contact(contact_id)
+                    new_conv_id = new_conv_result.get('id')
+                    print(f"🔄 Conversation ID шинэчлэгдлээ: {conv_id} → {new_conv_id}")
+                    conv_id = new_conv_id
+                except Exception as create_conv_error:
+                    print(f"💥 Conversation үүсгэхэд алдаа: {create_conv_error}")
+                    return f"Conversation үүсгэхэд алдаа гарлаа: {str(create_conv_error)}", 500
+            else:
+                print(f"❌ Conversation шалгахад алдаа: {e}")
+                # Алдаатай ч үргэлжлүүлэх
         
         # Conversation дээр thread мэдээлэл хадгалах (thread нь conversation specific)
         thread_key = f"openai_thread_{contact_id}"
@@ -923,6 +992,117 @@ def test_chatwoot():
     except Exception as e:
         print(f"💥 Chatwoot test алдаа: {e}")
         return {"status": "error", "message": f"Алдаа: {str(e)}"}, 500
+
+def check_or_create_contact(contact_id, email):
+    """Contact байгаа эсэхийг шалгаж, байхгүй бол шинээр үүсгэх"""
+    try:
+        # Эхлээд contact байгаа эсэхийг шалгах
+        print(f"🔍 Contact {contact_id}-г шалгаж байна...")
+        contact = get_contact(contact_id)
+        print(f"✅ Contact олдлоо: {contact.get('payload', {}).get('email', 'no email')}")
+        return contact
+        
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            print(f"❌ Contact {contact_id} олдсонгүй, шинээр үүсгэж байна...")
+            # Contact шинээр үүсгэх
+            try:
+                return create_contact(email)
+            except Exception as create_error:
+                print(f"💥 Contact үүсгэхэд алдаа: {create_error}")
+                raise create_error
+        else:
+            print(f"❌ Contact шалгахад алдаа: {e}")
+            raise e
+    except Exception as e:
+        print(f"💥 check_or_create_contact алдаа: {e}")
+        raise e
+
+def create_contact(email):
+    """Шинэ contact үүсгэх"""
+    try:
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts"
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        payload = {
+            "email": email,
+            "name": email.split("@")[0],  # email-ээс нэр гаргах
+            "custom_attributes": {
+                "email_verified": "0",  # Анхандаа баталгаажуулаагүй
+                "verification_date": ""
+            }
+        }
+        
+        print(f"🔗 Create contact URL: {url}")
+        print(f"📊 Create payload: {payload}")
+        
+        resp = requests.post(url, json=payload, headers=headers)
+        
+        print(f"📈 Create response status: {resp.status_code}")
+        print(f"📄 Create response text: {resp.text[:200]}...")
+        
+        resp.raise_for_status()
+        result = resp.json()
+        
+        new_contact_id = result.get('payload', {}).get('id')
+        print(f"✅ Шинэ contact үүсгэлээ: ID={new_contact_id}")
+        
+        return result
+        
+    except requests.exceptions.HTTPError as e:
+        print(f"❌ Contact үүсгэх HTTP алдаа: {e}")
+        print(f"📊 Response status: {resp.status_code}")
+        print(f"📄 Response text: {resp.text}")
+        raise e
+    except Exception as e:
+        print(f"💥 Contact үүсгэх алдаа: {e}")
+        raise e
+
+def create_conversation_for_contact(contact_id, inbox_id=None):
+    """Contact-ын тулд шинэ conversation үүсгэх"""
+    try:
+        # Хэрэв inbox_id заагаагүй бол default inbox ашиглах
+        if not inbox_id:
+            # Эхний inbox-г авах
+            inboxes_url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/inboxes"
+            headers = {"api_access_token": CHATWOOT_API_KEY}
+            
+            resp = requests.get(inboxes_url, headers=headers)
+            resp.raise_for_status()
+            
+            inboxes = resp.json().get('payload', [])
+            if not inboxes:
+                raise Exception("Inbox олдсонгүй")
+            
+            inbox_id = inboxes[0]['id']
+            print(f"📥 Default inbox ашиглаж байна: {inbox_id}")
+        
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        payload = {
+            "contact_id": contact_id,
+            "inbox_id": inbox_id,
+            "status": "open"
+        }
+        
+        print(f"🔗 Create conversation URL: {url}")
+        print(f"📊 Conversation payload: {payload}")
+        
+        resp = requests.post(url, json=payload, headers=headers)
+        
+        print(f"📈 Conversation response status: {resp.status_code}")
+        print(f"📄 Conversation response text: {resp.text[:200]}...")
+        
+        resp.raise_for_status()
+        result = resp.json()
+        
+        new_conv_id = result.get('id')
+        print(f"✅ Шинэ conversation үүсгэлээ: ID={new_conv_id}")
+        
+        return result
+        
+    except Exception as e:
+        print(f"💥 Conversation үүсгэх алдаа: {e}")
+        raise e
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
