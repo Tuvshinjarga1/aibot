@@ -54,11 +54,21 @@ def generate_verification_token(email, conv_id, contact_id):
 def verify_token(token):
     """JWT токеныг шалгах"""
     try:
+        print(f"🔍 verify_token: Starting verification for token: {token[:50]}...")
+        print(f"🔑 JWT_SECRET: {'SET' if JWT_SECRET and JWT_SECRET != 'your-secret-key-here' else 'DEFAULT/NOT SET'}")
+        
         payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        print(f"✅ JWT decode амжилттай: {payload}")
         return payload
-    except jwt.ExpiredSignatureError:
+        
+    except jwt.ExpiredSignatureError as e:
+        print(f"⏰ JWT хугацаа дууссан: {e}")
         return None
-    except jwt.InvalidTokenError:
+    except jwt.InvalidTokenError as e:
+        print(f"❌ JWT токен буруу: {e}")
+        return None
+    except Exception as e:
+        print(f"💥 verify_token алдаа: {e}")
         return None
 
 def send_verification_email(email, token):
@@ -808,6 +818,23 @@ def should_escalate_to_teams(thread_id, current_message):
         print(f"❌ Escalation шийдэх алдаа: {e}")
         # Алдаа гарвал анхны мессеж гэж үзэх
         return True, "Алдаа - анхны мессеж гэж үзэв"
+
+@app.route("/debug-env", methods=["GET"])
+def debug_env():
+    """Орчны хувьсагчдыг шалгах debug endpoint"""
+    return {
+        "JWT_SECRET": "SET" if JWT_SECRET else "NOT SET",
+        "OPENAI_API_KEY": "SET" if OPENAI_API_KEY else "NOT SET", 
+        "ASSISTANT_ID": "SET" if ASSISTANT_ID else "NOT SET",
+        "CHATWOOT_API_KEY": "SET" if CHATWOOT_API_KEY else "NOT SET",
+        "ACCOUNT_ID": "SET" if ACCOUNT_ID else "NOT SET",
+        "SMTP_SERVER": SMTP_SERVER,
+        "SMTP_PORT": SMTP_PORT,
+        "SENDER_EMAIL": "SET" if SENDER_EMAIL else "NOT SET",
+        "SENDER_PASSWORD": "SET" if SENDER_PASSWORD else "NOT SET",
+        "TEAMS_WEBHOOK_URL": "SET" if TEAMS_WEBHOOK_URL else "NOT SET",
+        "VERIFICATION_URL_BASE": VERIFICATION_URL_BASE
+    }
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
