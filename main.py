@@ -473,60 +473,66 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
         
         return error_msg
 
+def create_conversation_for_contact(contact_id, inbox_id):
+    """Contact-г Inbox-д харгалзуулж шинэ conversation үүсгэх"""
+    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
+    headers = {"api_access_token": CHATWOOT_API_KEY}
+    payload = {
+        "source_id": contact_id,
+        "inbox_id": inbox_id
+    }
+    resp = requests.post(url, json=payload, headers=headers)
+    resp.raise_for_status()
+    return resp.json()
+
 @app.route("/verify", methods=["GET"])
 def verify_email():
-    """Имэйл баталгаажуулах endpoint"""
     print(f"🔍 /verify endpoint дуудагдлаа")
-    
+
     token = request.args.get('token')
     print(f"📄 Received token: {token[:50] if token else 'None'}...")
-    
+
     if not token:
         print("❌ Токен олдсонгүй")
         return "Токен олдсонгүй!", 400
-    
-    print(f"🔓 Токеныг verify хийж байна...")
+
     payload = verify_token(token)
-    print(f"📊 Payload: {payload}")
-    
     if not payload:
         print("❌ Токен хүчингүй эсвэл хугацаа дууссан")
         return "Токен хүчингүй эсвэл хугацаа дууссан!", 400
-    
+
     try:
-        print("✅ Токен хүчинтэй, баталгаажуулалт эхлүүлж байна...")
-        
-        # Contact level дээр email_verified = true гэж тэмдэглэх
         conv_id = payload['conv_id']
         contact_id = payload['contact_id']
         email = payload['email']
-        
+
         print(f"📝 Conv ID: {conv_id}, Contact ID: {contact_id}, Email: {email}")
-        
-        # Contact дээр баталгаажуулалтын мэдээлэл хадгалах
-        print("📞 Contact update хийж байна...")
+
+        # ✅ Contact дээр verified тэмдэглэл
         update_result = update_contact(contact_id, {
-            "email_verified": "1",  # Checkbox type-д string "true" ашиглах
+            "email_verified": "1",
             "verified_email": email,
             "verification_date": datetime.utcnow().isoformat()
         })
         print(f"✅ Contact update result: {update_result}")
-        
-        # Conversation дээр thread мэдээлэл хадгалах (thread нь conversation specific)
+
+        # ✅ Inbox ID (example: 65547)
+        inbox_id = 65547
+        conv = create_conversation_for_contact(contact_id, inbox_id)
+        new_conv_id = conv.get("id")
+        print(f"✅ Conversation үүсгэв: {new_conv_id}")
+
+        # ✅ Thread ID reset
         thread_key = f"openai_thread_{contact_id}"
-        print(f"🧵 Thread key reset хийж байна: {thread_key}")
-        conv_update_result = update_conversation(conv_id, {
-            thread_key: None  # Шинэ thread эхлүүлэх
+        conv_update_result = update_conversation(new_conv_id, {
+            thread_key: None
         })
         print(f"✅ Conversation update result: {conv_update_result}")
-        
-        # Баталгаажуулах мессеж илгээх
-        print("💬 Chatwoot-д мессеж илгээж байна...")
-        send_to_chatwoot(conv_id, f"✅ Таны имэйл хаяг ({email}) амжилттай баталгаажлаа! Одоо та chatbot-той харилцаж болно.")
-        print("✅ Chatwoot мессеж амжилттай илгээлээ")
-        
-        print("🎉 Verification бүх үйлдэл амжилттай дууслаа")
-        
+
+        # ✅ Баталгаажуулсан мессеж
+        send_to_chatwoot(new_conv_id, f"✅ Таны имэйл хаяг ({email}) амжилттай баталгаажлаа! Одоо та chatbot-той харилцаж болно.")
+        print("✅ Chatwoot мессеж илгээлээ")
+
         return render_template_string("""
         <!DOCTYPE html>
         <html>
@@ -545,16 +551,10 @@ def verify_email():
         </body>
         </html>
         """, email=email)
-        
+
     except Exception as e:
-        print(f"💥 Verification алдаа: {e}")
-        print(f"📊 Exception type: {type(e).__name__}")
-        
-        # Request, response мэдээлэл бодит алдаанаас олох
         import traceback
-        print(f"🔍 Full traceback:")
         traceback.print_exc()
-        
         return f"Баталгаажуулахад алдаа гарлаа: {str(e)}", 500
 
 @app.route("/webhook", methods=["POST"])
@@ -893,36 +893,6 @@ def debug_env():
         "TEAMS_WEBHOOK_URL": "SET" if TEAMS_WEBHOOK_URL else "NOT SET",
         "VERIFICATION_URL_BASE": VERIFICATION_URL_BASE
     }
-
-@app.route("/test-chatwoot", methods=["GET"])
-def test_chatwoot():
-    """Chatwoot API холболтыг тест хийх"""
-    try:
-        # Энгийн API дуудлага хийж токен зөв эсэхийг шалгах
-        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
-        headers = {"api_access_token": CHATWOOT_API_KEY}
-        
-        print(f"🔗 Test URL: {url}")
-        print(f"🔑 API Key: {CHATWOOT_API_KEY[:10]}..." if CHATWOOT_API_KEY else "❌ API Key бүр байхгүй")
-        print(f"📊 Account ID: {ACCOUNT_ID}")
-        
-        resp = requests.get(url, headers=headers)
-        
-        print(f"📈 Test response status: {resp.status_code}")
-        print(f"📄 Test response: {resp.text[:300]}...")
-        
-        if resp.status_code == 200:
-            return {"status": "success", "message": "Chatwoot API холболт амжилттай!"}, 200
-        else:
-            return {
-                "status": "error", 
-                "message": f"API алдаа: {resp.status_code}",
-                "response": resp.text[:500]
-            }, resp.status_code
-            
-    except Exception as e:
-        print(f"💥 Chatwoot test алдаа: {e}")
-        return {"status": "error", "message": f"Алдаа: {str(e)}"}, 500
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
