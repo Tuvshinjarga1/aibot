@@ -38,25 +38,29 @@ def send_reply(conversation_id, content):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json or {}
+    event = data.get("event")
 
-    # 1) Хэрэглэгчийн бичсэн мессежийн текст:
-    message = data.get("content") or ""
+    # Зөвхөн шинэ мессеж үүссэн үед (message_created) ажиллана
+    if event != "message_created":
+        return jsonify({"status": "ignored"}), 200
 
-    # 2) Conversation ID-г шууд авч байна:
-    #    SaaS Chatwoot-д webhook payload-д 'conversation_id' гэж тодорхой талбартай ирдэг.
-    conversation_id = data.get("conversation_id")
+    # Шинэ мессежийн текст
+    message = data.get("content", "")
+    if not message:
+        return jsonify({"error": "No content in message_created"}), 400
+
+    # Conversation ID-г conversation обьект доторх id-аас авна
+    conversation = data.get("conversation", {})
+    conversation_id = conversation.get("id")
     if not conversation_id:
-        # Хэрвээ conversation_id байхгүй бол лог хийж, ямар payload ирж байгааг хараарай:
-        print("Webhook payload-д conversation_id олдсонгүй:", data)
-        return jsonify({"error": "conversation_id missing"}), 400
+        return jsonify({"error": "conversation.id missing"}), 400
 
-    # AI-r хариу үүсгэх
+    # AI-гаас хариу авна
     ai_reply = call_ai_model(message)
 
-    # Chatwoot API ашиглан хэрэглэгч рүү хариу илгээх
+    # Chatwoot API-р дамжуулан reply явуулна
     send_reply(conversation_id, ai_reply)
-
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok"}), 200
 
 if __name__ == "__main__":
     app.run(port=5001)
