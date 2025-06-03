@@ -117,11 +117,31 @@ def get_contact(contact_id):
 
 def update_contact(contact_id, attrs):
     """Contact-ийн custom attributes шинэчлэх"""
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/{contact_id}"
-    payload = {"custom_attributes": attrs}
-    resp = requests.put(url, json=payload, headers={"api_access_token": CHATWOOT_API_KEY})
-    resp.raise_for_status()
-    return resp.json()
+    try:
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contacts/{contact_id}"
+        payload = {"custom_attributes": attrs}
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        
+        print(f"🔗 Chatwoot API URL: {url}")
+        print(f"🔑 Using API Key: {CHATWOOT_API_KEY[:10]}..." if CHATWOOT_API_KEY else "❌ API Key бүр байхгүй")
+        print(f"📊 Payload: {payload}")
+        
+        resp = requests.put(url, json=payload, headers=headers)
+        
+        print(f"📈 Response status: {resp.status_code}")
+        print(f"📄 Response text: {resp.text[:200]}...")
+        
+        resp.raise_for_status()
+        return resp.json()
+        
+    except requests.exceptions.HTTPError as e:
+        print(f"❌ Chatwoot API HTTP алдаа: {e}")
+        print(f"📊 Response status: {resp.status_code}")
+        print(f"📄 Response text: {resp.text}")
+        raise e
+    except Exception as e:
+        print(f"💥 Contact update алдаа: {e}")
+        raise e
 
 def get_conversation(conv_id):
     """Conversation мэдээлэл авах"""
@@ -132,19 +152,57 @@ def get_conversation(conv_id):
 
 def update_conversation(conv_id, attrs):
     """Conversation-ийн custom attributes шинэчлэх"""
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/custom_attributes"
-    payload = {"custom_attributes": attrs}
-    resp = requests.post(url, json=payload, headers={"api_access_token": CHATWOOT_API_KEY})
-    resp.raise_for_status()
-    return resp.json()
+    try:
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/custom_attributes"
+        payload = {"custom_attributes": attrs}
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        
+        print(f"🔗 Conversation API URL: {url}")
+        print(f"📊 Payload: {payload}")
+        
+        resp = requests.post(url, json=payload, headers=headers)
+        
+        print(f"📈 Response status: {resp.status_code}")
+        print(f"📄 Response text: {resp.text[:200]}...")
+        
+        resp.raise_for_status()
+        return resp.json()
+        
+    except requests.exceptions.HTTPError as e:
+        print(f"❌ Conversation API HTTP алдаа: {e}")
+        print(f"📊 Response status: {resp.status_code}")
+        print(f"📄 Response text: {resp.text}")
+        raise e
+    except Exception as e:
+        print(f"💥 Conversation update алдаа: {e}")
+        raise e
 
 def send_to_chatwoot(conv_id, text):
     """Chatwoot руу мессеж илгээх"""
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/messages"
-    headers = {"api_access_token": CHATWOOT_API_KEY}
-    payload = {"content": text, "message_type": "outgoing"}
-    r = requests.post(url, json=payload, headers=headers)
-    r.raise_for_status()
+    try:
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/messages"
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        payload = {"content": text, "message_type": "outgoing"}
+        
+        print(f"🔗 Message API URL: {url}")
+        print(f"📊 Message payload: {payload}")
+        
+        r = requests.post(url, json=payload, headers=headers)
+        
+        print(f"📈 Message response status: {r.status_code}")
+        print(f"📄 Message response text: {r.text[:200]}...")
+        
+        r.raise_for_status()
+        return r.json()
+        
+    except requests.exceptions.HTTPError as e:
+        print(f"❌ Message API HTTP алдаа: {e}")
+        print(f"📊 Response status: {r.status_code}")
+        print(f"📄 Response text: {r.text}")
+        raise e
+    except Exception as e:
+        print(f"💥 Message send алдаа: {e}")
+        raise e
 
 def analyze_customer_issue(thread_id, current_message, customer_email=None):
     """AI ашиглан хэрэглэгчийн бүх чат түүхийг дүгнэж, comprehensive мэдээлэл өгөх"""
@@ -835,6 +893,36 @@ def debug_env():
         "TEAMS_WEBHOOK_URL": "SET" if TEAMS_WEBHOOK_URL else "NOT SET",
         "VERIFICATION_URL_BASE": VERIFICATION_URL_BASE
     }
+
+@app.route("/test-chatwoot", methods=["GET"])
+def test_chatwoot():
+    """Chatwoot API холболтыг тест хийх"""
+    try:
+        # Энгийн API дуудлага хийж токен зөв эсэхийг шалгах
+        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
+        headers = {"api_access_token": CHATWOOT_API_KEY}
+        
+        print(f"🔗 Test URL: {url}")
+        print(f"🔑 API Key: {CHATWOOT_API_KEY[:10]}..." if CHATWOOT_API_KEY else "❌ API Key бүр байхгүй")
+        print(f"📊 Account ID: {ACCOUNT_ID}")
+        
+        resp = requests.get(url, headers=headers)
+        
+        print(f"📈 Test response status: {resp.status_code}")
+        print(f"📄 Test response: {resp.text[:300]}...")
+        
+        if resp.status_code == 200:
+            return {"status": "success", "message": "Chatwoot API холболт амжилттай!"}, 200
+        else:
+            return {
+                "status": "error", 
+                "message": f"API алдаа: {resp.status_code}",
+                "response": resp.text[:500]
+            }, resp.status_code
+            
+    except Exception as e:
+        print(f"💥 Chatwoot test алдаа: {e}")
+        return {"status": "error", "message": f"Алдаа: {str(e)}"}, 500
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
