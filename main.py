@@ -473,65 +473,78 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
         
         return error_msg
 
-def create_conversation_for_contact(contact_id, inbox_id):
-    """Contact-г Inbox-д харгалзуулж шинэ conversation үүсгэх"""
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
+def create_contact_inbox(contact_id, inbox_id, source_id):
+    """Contact-г Inbox-д холбох (source_id = email гэх мэт)"""
+    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contact_inboxes"
     headers = {"api_access_token": CHATWOOT_API_KEY}
     payload = {
-        "source_id": contact_id,
-        "inbox_id": inbox_id
+        "contact_id": contact_id,
+        "inbox_id": inbox_id,
+        "source_id": source_id  # жишээ нь: email, uuid
     }
     resp = requests.post(url, json=payload, headers=headers)
+    print(f"📥 ContactInbox create: {resp.status_code} - {resp.text}")
     resp.raise_for_status()
     return resp.json()
 
+
+def create_conversation_for_contact(contact_inbox_source_id, inbox_id):
+    """Харгалзах Inbox-д шинэ conversation үүсгэх"""
+    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
+    headers = {"api_access_token": CHATWOOT_API_KEY}
+    payload = {
+        "source_id": contact_inbox_source_id,
+        "inbox_id": inbox_id
+    }
+    resp = requests.post(url, json=payload, headers=headers)
+    print(f"💬 Conversation create: {resp.status_code} - {resp.text}")
+    resp.raise_for_status()
+    return resp.json()
+
+
 @app.route("/verify", methods=["GET"])
 def verify_email():
-    print(f"🔍 /verify endpoint дуудагдлаа")
+    print("📩 /verify дуудлаа")
 
     token = request.args.get('token')
-    print(f"📄 Received token: {token[:50] if token else 'None'}...")
-
     if not token:
-        print("❌ Токен олдсонгүй")
-        return "Токен олдсонгүй!", 400
+        return "❌ Токен байхгүй байна!", 400
 
     payload = verify_token(token)
     if not payload:
-        print("❌ Токен хүчингүй эсвэл хугацаа дууссан")
-        return "Токен хүчингүй эсвэл хугацаа дууссан!", 400
+        return "❌ Токен хүчингүй эсвэл хугацаа дууссан байна!", 400
 
     try:
-        conv_id = payload['conv_id']
         contact_id = payload['contact_id']
         email = payload['email']
+        conv_id = payload.get('conv_id', None)
 
-        print(f"📝 Conv ID: {conv_id}, Contact ID: {contact_id}, Email: {email}")
+        inbox_id = 65547  # 👈 CloudMN inbox ID-г энд тохируул
 
-        # ✅ Contact дээр verified тэмдэглэл
+        # ✅ Step 1: Contact-г verified тэмдэглэх
         update_result = update_contact(contact_id, {
             "email_verified": "1",
             "verified_email": email,
             "verification_date": datetime.utcnow().isoformat()
         })
-        print(f"✅ Contact update result: {update_result}")
+        print(f"✅ Contact update: {update_result}")
 
-        # ✅ Inbox ID (example: 65547)
-        inbox_id = 65547
-        conv = create_conversation_for_contact(contact_id, inbox_id)
+        # ✅ Step 2: contact_inbox үүсгэх (source_id = email)
+        contact_inbox = create_contact_inbox(contact_id, inbox_id, source_id=email)
+
+        # ✅ Step 3: шинэ conversation эхлүүлэх
+        conv = create_conversation_for_contact(contact_inbox["source_id"], inbox_id)
         new_conv_id = conv.get("id")
-        print(f"✅ Conversation үүсгэв: {new_conv_id}")
+        print(f"✅ Conversation ID: {new_conv_id}")
 
-        # ✅ Thread ID reset
+        # ✅ Step 4: Thread key reset (optional)
         thread_key = f"openai_thread_{contact_id}"
-        conv_update_result = update_conversation(new_conv_id, {
+        update_conversation(new_conv_id, {
             thread_key: None
         })
-        print(f"✅ Conversation update result: {conv_update_result}")
 
-        # ✅ Баталгаажуулсан мессеж
-        send_to_chatwoot(new_conv_id, f"✅ Таны имэйл хаяг ({email}) амжилттай баталгаажлаа! Одоо та chatbot-той харилцаж болно.")
-        print("✅ Chatwoot мессеж илгээлээ")
+        # ✅ Step 5: Амжилтын мессеж илгээх
+        send_to_chatwoot(new_conv_id, f"✅ Таны имэйл хаяг ({email}) амжилттай баталгаажлаа! Chatbot-той харилцана уу.")
 
         return render_template_string("""
         <!DOCTYPE html>
@@ -547,7 +560,7 @@ def verify_email():
         </head>
         <body>
             <div class="success">✅ Амжилттай баталгаажлаа!</div>
-            <div class="info">Таны имэйл хаяг ({{ email }}) баталгаажлаа.<br>Одоо та chatbot-тойгоо харилцаж болно.</div>
+            <div class="info">Таны имэйл хаяг ({{ email }}) баталгаажсан байна.<br>Одоо та chatbot-той харилцах боломжтой боллоо.</div>
         </body>
         </html>
         """, email=email)
@@ -555,7 +568,7 @@ def verify_email():
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return f"Баталгаажуулахад алдаа гарлаа: {str(e)}", 500
+        return f"❌ Баталгаажуулахад алдаа гарлаа: {str(e)}", 500
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -893,23 +906,6 @@ def debug_env():
         "TEAMS_WEBHOOK_URL": "SET" if TEAMS_WEBHOOK_URL else "NOT SET",
         "VERIFICATION_URL_BASE": VERIFICATION_URL_BASE
     }
-
-@app.route("/test-chatwoot", methods=["GET"])
-def test_chatwoot():
-    try:
-        # 🔁 Ямар нэг ХҮЧИНТЭЙ conversation ID-г энд бичиж турш
-        test_conv_id = "65547"  # <-- энэ ID-г өөрийн inbox/conversation-оос авна уу
-        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{test_conv_id}"
-        headers = {"api_access_token": CHATWOOT_API_KEY}
-
-        resp = requests.get(url, headers=headers)
-        return {
-            "status": resp.status_code,
-            "body": resp.text[:500]
-        }
-
-    except Exception as e:
-        return {"error": str(e)}, 500
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
