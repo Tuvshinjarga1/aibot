@@ -704,7 +704,7 @@ def webhook():
                         conv_id,
                         message_content,
                         verified_email,
-                        f"Хэрэглэгчийн асуудлын дүгнэлт - {reason}",
+                        f"Хэрэглэгчийн асуудлын дүгнэлт TODO - {reason}",
                         analysis
                     )
                     print("✅ Асуудлын дүгнэлт ажилтанд илгээлээ")
@@ -770,7 +770,7 @@ def escalate_to_human(conv_id, customer_message, customer_email=None):
             conv_id,
             customer_message,
             customer_email,
-            "Хэрэглэгчийн асуудлын дүгнэлт: TODO",
+            "Хэрэглэгчийн асуудлын дүгнэлт: ",
             simple_analysis
         )
         
