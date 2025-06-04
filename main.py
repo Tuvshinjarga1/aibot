@@ -770,7 +770,7 @@ def escalate_to_human(conv_id, customer_message, customer_email=None):
             conv_id,
             customer_message,
             customer_email,
-            "Хэрэглэгчийн асуудлын дүгнэлт",
+            "Хэрэглэгчийн асуудлын дүгнэлт: TODO",
             simple_analysis
         )
         
