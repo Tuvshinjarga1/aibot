@@ -340,7 +340,7 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
         if ai_analysis:
             teams_message["attachments"][0]["content"]["body"].append({
                 "type": "TextBlock",
-                "text": "🤖 AI Дүгнэлт TODO:",
+                "text": "🤖 AI Дүгнэлт:",
                 "weight": "Bolder",
                 "size": "Medium",
                 "spacing": "Large"
@@ -728,7 +728,7 @@ def test_teams():
     
     try:
         # Тест дүгнэлт үүсгэх
-        test_analysis = """АСУУДЛЫН ТӨРӨЛ: Teams интеграцийн тест
+        test_analysis = """АСУУДЛЫН ТӨРӨЛ TODO: Teams интеграцийн тест
 ЯАРАЛТАЙ БАЙДАЛ: Бага
 АСУУДЛЫН ТОВЧ ТАЙЛБАР: Систем зөвөөр ажиллаж байгаа эсэхийг шалгах зорилготой тест мэдээлэл.
 ШААРДЛАГАТАЙ АРГА ХЭМЖЭЭ: Teams мэдээллийг ажилтан харж, системтэй танилцах
@@ -770,7 +770,7 @@ def escalate_to_human(conv_id, customer_message, customer_email=None):
             conv_id,
             customer_message,
             customer_email,
-            "Хэрэглэгчийн асуудлын дүгнэлт: ",
+            "Хэрэглэгчийн асуудлын дүгнэлт: TODO",
             simple_analysis
         )
         
