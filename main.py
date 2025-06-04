@@ -340,7 +340,7 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
         if ai_analysis:
             teams_message["attachments"][0]["content"]["body"].append({
                 "type": "TextBlock",
-                "text": "🤖 AI Дүгнэлт:",
+                "text": "🤖 AI Дүгнэлт TODO:",
                 "weight": "Bolder",
                 "size": "Medium",
                 "spacing": "Large"
@@ -704,7 +704,7 @@ def webhook():
                         conv_id,
                         message_content,
                         verified_email,
-                        f"Хэрэглэгчийн асуудлын дүгнэлт TODO - {reason}",
+                        f"Хэрэглэгчийн асуудлын дүгнэлт - {reason}",
                         analysis
                     )
                     print("✅ Асуудлын дүгнэлт ажилтанд илгээлээ")
