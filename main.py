@@ -664,6 +664,7 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
         # Teams message format
         teams_message = {
             "type": "message",
+            "text": f"💬 **Хэрэглэгчийн асуудал:**\n\n{customer_message}",
             "attachments": [{
                 "contentType": "application/vnd.microsoft.card.adaptive",
                 "content": {
@@ -679,25 +680,19 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
                             "color": "Attention"
                         },
                         {
-                            "type": "TextBlock",
-                            "text": "AI систем хэрэглэгчийн асуудлыг дүгнэж, ажилтны анхаарал татахуйц асуудал гэж үзэж байна.",
-                            "wrap": True,
-                            "color": "Default"
-                        },
-                        {
                             "type": "FactSet",
                             "facts": [
                                 {
-                                    "title": "Харилцагч:",
+                                    "title": "👤 Харилцагч:",
                                     "value": customer_email or "Тодорхойгүй"
                                 },
                                 {
-                                    "title": "Хэрэглэгчийн мессеж:",
-                                    "value": customer_message[:300] + ("..." if len(customer_message) > 300 else "")
+                                    "title": "🕐 Хугацаа:",
+                                    "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 },
                                 {
-                                    "title": "Хугацаа:",
-                                    "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    "title": "🔍 Шалтгаан:",
+                                    "value": escalation_reason
                                 }
                             ]
                         }
