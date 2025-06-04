@@ -10,6 +10,17 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
 
+# RAG системийн импортууд
+import json
+import hashlib
+from urllib.parse import urljoin, urlparse
+from bs4 import BeautifulSoup
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain.docstore.document import Document
+import pickle
+
 app = Flask(__name__)
 
 # Орчны хувьсагчид
@@ -36,10 +47,369 @@ VERIFICATION_URL_BASE = os.environ.get("VERIFICATION_URL_BASE", "http://localhos
 # OpenAI клиент
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# RAG систем тохиргоо
+RAG_ENABLED = os.environ.get("RAG_ENABLED", "true").lower() == "true"
+VECTOR_STORE_PATH = "cloudmn_vectorstore"
+CRAWL_CACHE_FILE = "cloudmn_crawl_cache.json"
+CRAWL_MAX_PAGES = int(os.environ.get("CRAWL_MAX_PAGES", "100"))
+ESCALATION_THRESHOLD = int(os.environ.get("ESCALATION_THRESHOLD", "3"))  # Хэдэн асуулт гарсны дараа escalate хийх
+
+# Global vector store
+vector_store = None
+embeddings = None
+
+# Хэрэглэгчийн асуултын түүх хадгалах (conversation_id -> query_history)
+user_query_history = {}
+# URL хадгалах хэсэг (conversation_id -> last_urls)
+user_last_urls = {}
+
+# RAG системийг эхлүүлэх
+if RAG_ENABLED:
+    try:
+        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+        if os.path.exists(f"{VECTOR_STORE_PATH}.faiss"):
+            vector_store = FAISS.load_local(VECTOR_STORE_PATH, embeddings)
+            print("✅ Хадгалагдсан vector store-г ачааллаа")
+        else:
+            print("⚠️ Vector store олдсонгүй - эхлээд crawl хийх хэрэгтэй")
+    except Exception as e:
+        print(f"❌ RAG систем эхлүүлэхэд алдаа: {e}")
+        RAG_ENABLED = False
+
 def is_valid_email(email):
     """Имэйл хаягийн форматыг шалгах"""
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
+
+def clean_text(text):
+    """Текстийг цэвэрлэх"""
+    # Олон мөр шилжих тэмдгийг нэг болгох
+    text = re.sub(r'\n\s*\n', '\n', text)
+    # Олон зайг нэг болгох
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+def extract_content_from_url(url, visited_urls=None):
+    """Нэг URL-аас контент авах"""
+    if visited_urls is None:
+        visited_urls = set()
+    
+    if url in visited_urls:
+        return None
+    
+    visited_urls.add(url)
+    
+    try:
+        print(f"📄 Crawling: {url}")
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Title авах
+        title = soup.find('title')
+        title_text = title.get_text().strip() if title else "Untitled"
+        
+        # Main content авах
+        content_selectors = [
+            'main', 'article', '.content', '#content',
+            '.markdown', '.doc-content', '.documentation'
+        ]
+        
+        content = None
+        for selector in content_selectors:
+            content = soup.select_one(selector)
+            if content:
+                break
+        
+        if not content:
+            content = soup.find('body')
+        
+        if not content:
+            return None
+        
+        # Script, style гэх мэт элементүүдийг устгах
+        for element in content(["script", "style", "nav", "header", "footer", "aside"]):
+            element.decompose()
+        
+        # Текст контент авах
+        text_content = content.get_text()
+        text_content = clean_text(text_content)
+        
+        if len(text_content.strip()) < 50:  # Хэт богино контент алгасах
+            return None
+        
+        return {
+            'url': url,
+            'title': title_text,
+            'content': text_content,
+            'length': len(text_content)
+        }
+        
+    except Exception as e:
+        print(f"❌ Error crawling {url}: {e}")
+        return None
+
+def crawl_cloudmn_docs():
+    """CloudMN docs сайтыг crawl хийх"""
+    base_url = "https://docs.cloud.mn"
+    start_urls = [
+        "https://docs.cloud.mn/",
+    ]
+    
+    visited_urls = set()
+    all_documents = []
+    
+    # Cache файлыг шалгах
+    if os.path.exists(CRAWL_CACHE_FILE):
+        try:
+            with open(CRAWL_CACHE_FILE, 'r', encoding='utf-8') as f:
+                cached_data = json.load(f)
+                print(f"✅ Cache-аас {len(cached_data)} хуудас ачааллаа")
+                return cached_data
+        except Exception as e:
+            print(f"⚠️ Cache уншихад алдаа: {e}")
+    
+    print(f"🕷️ CloudMN docs crawl эхэлж байна... (Max: {CRAWL_MAX_PAGES} хуудас)")
+    
+    urls_to_visit = start_urls.copy()
+    page_count = 0
+    
+    while urls_to_visit and page_count < CRAWL_MAX_PAGES:
+        current_url = urls_to_visit.pop(0)
+        
+        if current_url in visited_urls:
+            continue
+        
+        page_data = extract_content_from_url(current_url, visited_urls)
+        if page_data:
+            all_documents.append(page_data)
+            page_count += 1
+            print(f"✅ [{page_count}/{CRAWL_MAX_PAGES}] {page_data['title']}")
+            
+            # Шинэ линкүүд олох
+            try:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                response = requests.get(current_url, headers=headers, timeout=10)
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                for link in soup.find_all('a', href=True):
+                    href = link['href']
+                    full_url = urljoin(current_url, href)
+                    
+                    # CloudMN docs доторх линк мөн эсэхийг шалгах
+                    if (full_url.startswith(base_url) and 
+                        full_url not in visited_urls and 
+                        full_url not in urls_to_visit and
+                        not full_url.endswith(('.pdf', '.jpg', '.png', '.gif', '.css', '.js'))):
+                        urls_to_visit.append(full_url)
+                        
+            except Exception as e:
+                print(f"⚠️ Линк олохоор алдаа {current_url}: {e}")
+        
+        time.sleep(0.5)  # Сайтыг хэт дарамтлахгүйн тулд
+    
+    print(f"✅ Crawl дууслаа: {len(all_documents)} хуудас")
+    
+    # Cache хадгалах
+    try:
+        with open(CRAWL_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(all_documents, f, ensure_ascii=False, indent=2)
+        print(f"💾 Cache хадгаллаа: {CRAWL_CACHE_FILE}")
+    except Exception as e:
+        print(f"⚠️ Cache хадгалахад алдаа: {e}")
+    
+    return all_documents
+
+def build_vector_store():
+    """Vector store үүсгэх"""
+    global vector_store, embeddings
+    
+    if not RAG_ENABLED:
+        print("❌ RAG идэвхгүй байна")
+        return False
+    
+    try:
+        print("🔧 Vector store үүсгэж байна...")
+        
+        # Документууд crawl хийх
+        documents_data = crawl_cloudmn_docs()
+        
+        if not documents_data:
+            print("❌ Crawl хийх документ олдсонгүй")
+            return False
+        
+        # Text splitter
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            separators=["\n\n", "\n", ". ", "! ", "? ", " "]
+        )
+        
+        # Документуудыг chunks болгох
+        all_chunks = []
+        for doc_data in documents_data:
+            # Текстийг хэсэглэх
+            chunks = text_splitter.split_text(doc_data['content'])
+            
+            for i, chunk in enumerate(chunks):
+                if len(chunk.strip()) > 50:  # Хэт богино chunk алгасах
+                    doc = Document(
+                        page_content=chunk,
+                        metadata={
+                            'title': doc_data['title'],
+                            'url': doc_data['url'],
+                            'chunk_id': i,
+                            'total_chunks': len(chunks)
+                        }
+                    )
+                    all_chunks.append(doc)
+        
+        print(f"📄 {len(all_chunks)} ширхэг chunk үүсгэлээ")
+        
+        if not all_chunks:
+            print("❌ Боловсруулах chunk олдсонгүй")
+            return False
+        
+        # Vector store үүсгэх
+        if not embeddings:
+            embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+        
+        print("🔮 Embeddings үүсгэж байна...")
+        vector_store = FAISS.from_documents(all_chunks, embeddings)
+        
+        # Хадгалах
+        vector_store.save_local(VECTOR_STORE_PATH)
+        print(f"💾 Vector store хадгаллаа: {VECTOR_STORE_PATH}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Vector store үүсгэхэд алдаа: {e}")
+        return False
+
+def search_cloudmn_docs(query, k=5):
+    """CloudMN docs-аас хайлт хийх"""
+    global vector_store
+    
+    if not RAG_ENABLED or not vector_store:
+        return []
+    
+    try:
+        # Similarity search
+        results = vector_store.similarity_search(query, k=k)
+        
+        search_results = []
+        for doc in results:
+            search_results.append({
+                'content': doc.page_content,
+                'title': doc.metadata.get('title', 'Unknown'),
+                'url': doc.metadata.get('url', ''),
+                'chunk_id': doc.metadata.get('chunk_id', 0)
+            })
+        
+        return search_results
+        
+    except Exception as e:
+        print(f"❌ RAG хайлт алдаа: {e}")
+        return []
+
+def is_similar_query(query1, query2, threshold=0.7):
+    """Хоёр асуултын ижил төрөл эсэхийг GPT-ээр шалгах"""
+    try:
+        system_msg = """Та бол асуултын ижил төрлийг тодорхойлох мэргэжилтэн. 
+        Хоёр асуулт ижил төрлийн асуудлын талаар байгаа эсэхийг тодорхойлно уу.
+        Зөвхөн 'ИЖИЛ' эсвэл 'ӨӨРЛӨГ' гэж хариулна уу."""
+        
+        user_msg = f"""
+        Асуулт 1: "{query1}"
+        Асуулт 2: "{query2}"
+        
+        Эдгээр хоёр асуулт ижил төрлийн асуудлын талаар байгаа юу?
+        - Хэрэв ижил төрлийн техникийн асуудал бол: ИЖИЛ
+        - Хэрэв өөр төрлийн асуудал бол: ӨӨРЛӨГ
+        """
+        
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg}
+            ],
+            max_tokens=10,
+            temperature=0.1
+        )
+        
+        result = response.choices[0].message.content.strip()
+        return "ИЖИЛ" in result
+        
+    except Exception as e:
+        print(f"❌ Асуулт харьцуулах алдаа: {e}")
+        return False
+
+def should_search_new_content(conv_id, current_query):
+    """Шинэ контент хайх эсэхийг шийдэх"""
+    global user_query_history
+    
+    # Хэрэв энэ conversation-д өмнө асуулт байгаагүй бол шинэ хайлт хийх
+    if conv_id not in user_query_history:
+        user_query_history[conv_id] = [current_query]
+        return True, "Анхны асуулт"
+    
+    # Сүүлийн асуулттай харьцуулах
+    previous_queries = user_query_history[conv_id]
+    last_query = previous_queries[-1] if previous_queries else ""
+    
+    # Хэрэв ижил төрлийн асуулт бол шинэ хайлт хийхгүй
+    if last_query and is_similar_query(current_query, last_query):
+        return False, "Ижил төрлийн асуулт"
+    
+    # Шинэ төрлийн асуулт бол хайлт хийх
+    user_query_history[conv_id].append(current_query)
+    
+    # Түүхийг хязгаарлах (сүүлийн 10 асуулт)
+    if len(user_query_history[conv_id]) > 10:
+        user_query_history[conv_id] = user_query_history[conv_id][-10:]
+    
+    return True, "Шинэ төрлийн асуулт"
+
+def should_escalate_to_support(conv_id, current_message):
+    """Дэмжлэгийн багт илгээх эсэхийг шийдэх (хязгаарлагдсан логик)"""
+    global user_query_history
+    
+    try:
+        # Хэрэв RAG идэвхгүй бол escalate хийх
+        if not RAG_ENABLED:
+            return True, "RAG систем идэвхгүй"
+        
+        # Асуултын тоог шалгах
+        query_count = len(user_query_history.get(conv_id, []))
+        
+        # Хэрэв тодорхой тооноос илүү асуулт гарсан бол escalate хийх
+        if query_count >= ESCALATION_THRESHOLD:
+            return True, f"Олон асуулт гарсан ({query_count} >= {ESCALATION_THRESHOLD})"
+        
+        # Тусгай түлхүүр үгс байгаа эсэхийг шалгах
+        urgent_keywords = [
+            "алдаа гарч байна", "ажиллахгүй байна", "буруу", "асуудал",
+            "тусламж хэрэгтэй", "яаралтай", "хариу ирэхгүй", "холбогдохгүй"
+        ]
+        
+        message_lower = current_message.lower()
+        if any(keyword in message_lower for keyword in urgent_keywords):
+            return True, "Яаралтай түлхүүр үг олдсон"
+        
+        # Бусад тохиолдолд escalate хийхгүй
+        return False, "Хэвийн асуулт"
+        
+    except Exception as e:
+        print(f"❌ Escalation шийдэх алдаа: {e}")
+        return False, "Алдаа гарсан"
 
 def generate_verification_token(email, conv_id, contact_id):
     """Баталгаажуулах JWT токен үүсгэх"""
@@ -473,6 +843,164 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
         
         return error_msg
 
+def get_ai_response_with_rag(thread_id, message_content, conv_id=None, customer_email=None, retry_count=0):
+    """RAG системтэй AI хариулт авах"""
+    global user_last_urls
+    
+    try:
+        # CloudMN docs-аас холбогдох мэдээлэл хайх
+        rag_context = ""
+        used_urls = []
+        
+        if RAG_ENABLED and vector_store and conv_id:
+            # Шинэ контент хайх эсэхийг шийдэх
+            should_search, search_reason = should_search_new_content(conv_id, message_content)
+            print(f"🔍 Хайлт шийдвэр: {should_search} - {search_reason}")
+            
+            if should_search:
+                # Шинэ хайлт хийх
+                search_results = search_cloudmn_docs(message_content, k=3)
+                if search_results:
+                    print(f"📚 {len(search_results)} үр дүн олдлоо")
+                    rag_context = "\n\nCloudMN баримт бичгээс олсон холбогдох мэдээлэл:\n"
+                    
+                    # URL цуглуулах
+                    new_urls = []
+                    for i, result in enumerate(search_results, 1):
+                        rag_context += f"\n{i}. {result['title']} - {result['url']}\n{result['content'][:500]}...\n"
+                        if result['url'] and result['url'] not in new_urls:
+                            new_urls.append(result['url'])
+                    
+                    # URL хадгалах
+                    user_last_urls[conv_id] = new_urls
+                    used_urls = new_urls
+                    print(f"🔗 Шинэ URL хадгаллаа: {len(new_urls)} ширхэг")
+                else:
+                    print("❌ Хайлтын үр дүн олдсонгүй")
+            else:
+                # Өмнөх URL ашиглах
+                if conv_id in user_last_urls and user_last_urls[conv_id]:
+                    used_urls = user_last_urls[conv_id]
+                    print(f"🔗 Өмнөх URL ашиглаж байна: {len(used_urls)} ширхэг")
+                    
+                    # Өмнөх мэдээллийг дурдах
+                    rag_context = f"\n\nТа өмнө дараах CloudMN хуудсуудыг үзэж болно:\n"
+                    for i, url in enumerate(used_urls[:3], 1):
+                        rag_context += f"{i}. {url}\n"
+                else:
+                    print("⚠️ Өмнөх URL олдсонгүй")
+        
+        # Assistant-д мэдээлэл дамжуулах
+        enhanced_message = message_content
+        if rag_context:
+            enhanced_message += rag_context
+        
+        # Хэрэглэгчийн мессежийг thread руу нэмэх
+        client.beta.threads.messages.create(
+            thread_id=thread_id,
+            role="user",
+            content=enhanced_message
+        )
+
+        # Assistant run үүсгэх
+        run = client.beta.threads.runs.create(
+            thread_id=thread_id, 
+            assistant_id=ASSISTANT_ID
+        )
+
+        # Run дуусахыг хүлээх
+        max_wait = 30
+        wait_count = 0
+        while wait_count < max_wait:
+            run_status = client.beta.threads.runs.retrieve(
+                thread_id=thread_id, 
+                run_id=run.id
+            )
+            
+            if run_status.status == "completed":
+                break
+            elif run_status.status in ["failed", "cancelled", "expired"]:
+                error_msg = "Уучлаарай, алдаа гарлаа. Дахин оролдоно уу."
+                
+                # Teams мэдээлэх (хэрэв эхний удаагийн алдаа бол)
+                if retry_count == 0 and conv_id:
+                    send_teams_notification(
+                        conv_id, 
+                        message_content, 
+                        customer_email, 
+                        f"AI run статус алдаа: {run_status.status}",
+                        f"OpenAI run ID: {run.id}, Status: {run_status.status}"
+                    )
+                
+                return error_msg
+                
+            time.sleep(1)
+            wait_count += 1
+
+        if wait_count >= max_wait:
+            timeout_msg = "Хариулахад хэт удаж байна. Дахин оролдоно уу."
+            
+            # Teams мэдээлэх (хэрэв эхний удаагийн timeout бол)
+            if retry_count == 0 and conv_id:
+                send_teams_notification(
+                    conv_id, 
+                    message_content, 
+                    customer_email, 
+                    "AI хариулт timeout (30 секунд)",
+                    f"OpenAI run ID: {run.id}, Thread ID: {thread_id}"
+                )
+            
+            return timeout_msg
+
+        # Assistant-ийн хариультыг авах
+        messages = client.beta.threads.messages.list(thread_id=thread_id)
+        
+        for msg in messages.data:
+            if msg.role == "assistant":
+                reply = ""
+                for content_block in msg.content:
+                    if hasattr(content_block, 'text'):
+                        reply += content_block.text.value
+                        
+                # URL-ыг хариултын төгсгөлд нэмэх
+                if used_urls and conv_id:
+                    reply += f"\n\n📋 Дэлгэрэнгүй мэдээлэл авах бол дараах хуудсуудыг үзэж болно:\n"
+                    for url in used_urls[:3]:  # Эхний 3-ыг харуулах
+                        reply += f"• {url}\n"
+                        
+                return reply
+
+        # Хариулт олдохгүй
+        no_response_msg = "Хариулт олдсонгүй. Дахин оролдоно уу."
+        
+        # Teams мэдээлэх (хэрэв эхний удаагийн алдаа бол)
+        if retry_count == 0 and conv_id:
+            send_teams_notification(
+                conv_id, 
+                message_content, 
+                customer_email, 
+                "AI хариулт олдсонгүй",
+                f"Thread ID: {thread_id}, Messages хайлтад хариулт байхгүй"
+            )
+        
+        return no_response_msg
+        
+    except Exception as e:
+        print(f"AI хариулт авахад алдаа: {e}")
+        error_msg = "Уучлаарай, алдаа гарлаа. Дахин оролдоно уу."
+        
+        # Teams мэдээлэх (хэрэв эхний удаагийн алдаа бол)
+        if retry_count == 0 and conv_id:
+            send_teams_notification(
+                conv_id, 
+                message_content, 
+                customer_email, 
+                "AI системийн алдаа (Exception)",
+                f"Python exception: {str(e)}, Thread ID: {thread_id}"
+            )
+        
+        return error_msg
+
 @app.route("/verify", methods=["GET"])
 def verify_email():
     print("📩 /verify дуудлаа")
@@ -650,7 +1178,7 @@ def webhook():
         ai_response = None
         
         while retry_count <= MAX_AI_RETRIES:
-            ai_response = get_ai_response(thread_id, message_content, conv_id, verified_email, retry_count)
+            ai_response = get_ai_response_with_rag(thread_id, message_content, conv_id, verified_email, retry_count)
             
             # Хэрэв алдаатай хариулт биш бол амжилттай
             if not any(error_phrase in ai_response for error_phrase in [
@@ -690,7 +1218,7 @@ def webhook():
             print("🔍 Teams-д илгээх хэрэгтэй эсэхийг шалгаж байна...")
             
             # Шинэ асуудал мөн эсэхийг шалгах
-            should_escalate, reason = should_escalate_to_teams(thread_id, message_content)
+            should_escalate, reason = should_escalate_to_support(conv_id, message_content)
             
             if should_escalate:
                 print(f"✅ {reason} - Teams-д илгээх")
@@ -728,7 +1256,7 @@ def test_teams():
     
     try:
         # Тест дүгнэлт үүсгэх
-        test_analysis = """АСУУДЛЫН ТӨРӨЛ TODO: Teams интеграцийн тест
+        test_analysis = """АСУУДЛЫН ТӨРӨЛ : Teams интеграцийн тест
 ЯАРАЛТАЙ БАЙДАЛ: Бага
 АСУУДЛЫН ТОВЧ ТАЙЛБАР: Систем зөвөөр ажиллаж байгаа эсэхийг шалгах зорилготой тест мэдээлэл.
 ШААРДЛАГАТАЙ АРГА ХЭМЖЭЭ: Teams мэдээллийг ажилтан харж, системтэй танилцах
@@ -770,7 +1298,7 @@ def escalate_to_human(conv_id, customer_message, customer_email=None):
             conv_id,
             customer_message,
             customer_email,
-            "Хэрэглэгчийн асуудлын дүгнэлт: TODO",
+            "Хэрэглэгчийн асуудлын дүгнэлт:",
             simple_analysis
         )
         
@@ -785,70 +1313,16 @@ def escalate_to_human(conv_id, customer_message, customer_email=None):
         print(f"❌ Escalation алдаа: {e}")
         return "Уучлаарай, алдаа гарлаа. Дахин оролдоно уу."
 
-def should_escalate_to_teams(thread_id, current_message):
-    """Тухайн асуудлыг Teams-д илгээх хэрэгтэй эсэхийг шийдэх"""
-    try:
-        # OpenAI thread-с сүүлийн 20 мессежийг авах
-        messages = client.beta.threads.messages.list(thread_id=thread_id, limit=20)
-        
-        # Хэрэглэгчийн мессежүүдийг цуглуулах
-        user_messages = []
-        for msg in reversed(messages.data):
-            if msg.role == "user":
-                content = ""
-                for content_block in msg.content:
-                    if hasattr(content_block, 'text'):
-                        content += content_block.text.value
-                if content.strip():
-                    user_messages.append(content.strip())
-        
-        # Хэрэв анхны мессеж бол Teams-д илгээх
-        if len(user_messages) <= 1:
-            return True, "Анхны асуулт"
-        
-        # AI-аар шинэ асуудал мөн эсэхийг шалгах
-        system_msg = (
-            "Та бол чат дүн шинжилгээний мэргэжилтэн. "
-            "Хэрэглэгчийн сүүлийн мессеж нь шинэ асуудал мөн эсэхийг тодорхойлно уу."
-        )
-        
-        user_msg = f'''
-Хэрэглэгчийн өмнөх мессежүүд:
-{chr(10).join(user_messages[:-1])}
-
-Одоогийн мессеж: "{current_message}"
-
-Дараах аль нэгээр хариулна уу:
-- "ШИН_АСУУДАЛ" - хэрэв одоогийн мессеж шинэ төрлийн асуудал бол
-- "ҮРГЭЛЖЛЭЛ" - хэрэв өмнөх асуудлын үргэлжлэл, тодруулга бол
-- "ДАХИН_АСУУЛТ" - хэрэв ижил асуудлыг дахин асууж байгаа бол
-'''
-        
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg}
-            ],
-            max_tokens=50,
-            temperature=0.1
-        )
-        
-        analysis_result = response.choices[0].message.content.strip()
-        
-        if "ШИН_АСУУДАЛ" in analysis_result:
-            return True, "Шинэ асуудал илрэв"
-        else:
-            return False, "Өмнөх асуудлын үргэлжлэл"
-            
-    except Exception as e:
-        print(f"❌ Escalation шийдэх алдаа: {e}")
-        # Алдаа гарвал анхны мессеж гэж үзэх
-        return True, "Алдаа - анхны мессеж гэж үзэв"
+# def should_escalate_to_teams(thread_id, current_message):
+#     """Тухайн асуудлыг Teams-д илгээх хэрэгтэй эсэхийг шийдэх (хуучин функц - ашиглагддаггүй)"""
+#     # Энэ функц ашиглагддаггүй - should_escalate_to_support ашиглах
+#     return False, "Хуучин функц - ашиглагддаггүй"
 
 @app.route("/debug-env", methods=["GET"])
 def debug_env():
     """Орчны хувьсагчдыг шалгах debug endpoint"""
+    global user_query_history, user_last_urls
+    
     return {
         "JWT_SECRET": "SET" if JWT_SECRET else "NOT SET",
         "OPENAI_API_KEY": "SET" if OPENAI_API_KEY else "NOT SET", 
@@ -860,8 +1334,222 @@ def debug_env():
         "SENDER_EMAIL": "SET" if SENDER_EMAIL else "NOT SET",
         "SENDER_PASSWORD": "SET" if SENDER_PASSWORD else "NOT SET",
         "TEAMS_WEBHOOK_URL": "SET" if TEAMS_WEBHOOK_URL else "NOT SET",
-        "VERIFICATION_URL_BASE": VERIFICATION_URL_BASE
+        "VERIFICATION_URL_BASE": VERIFICATION_URL_BASE,
+        "RAG_ENABLED": RAG_ENABLED,
+        "ESCALATION_THRESHOLD": ESCALATION_THRESHOLD,
+        "active_conversations": len(user_query_history),
+        "conversations_with_urls": len(user_last_urls)
     }
+
+@app.route("/rag/build", methods=["POST"])
+def build_rag():
+    """RAG vector store үүсгэх/шинэчлэх"""
+    if not RAG_ENABLED:
+        return jsonify({"error": "RAG систем идэвхгүй байна"}), 400
+    
+    try:
+        print("🚀 RAG систем үүсгэх хүсэлт ирлээ")
+        success = build_vector_store()
+        
+        if success:
+            return jsonify({
+                "status": "success", 
+                "message": "Vector store амжилттай үүсгэлээ!",
+                "vector_store_path": VECTOR_STORE_PATH
+            }), 200
+        else:
+            return jsonify({"error": "Vector store үүсгэхэд алдаа гарлаа"}), 500
+            
+    except Exception as e:
+        return jsonify({"error": f"Алдаа: {str(e)}"}), 500
+
+@app.route("/rag/search", methods=["POST"])
+def search_rag():
+    """RAG системээр хайлт хийх (тест зорилгоор)"""
+    if not RAG_ENABLED:
+        return jsonify({"error": "RAG систем идэвхгүй байна"}), 400
+    
+    if not vector_store:
+        return jsonify({"error": "Vector store үүсгэгдээгүй байна. /rag/build дуудна уу."}), 400
+    
+    try:
+        data = request.json
+        query = data.get("query", "").strip()
+        k = data.get("k", 5)
+        
+        if not query:
+            return jsonify({"error": "Query заавал байх ёстой"}), 400
+        
+        results = search_cloudmn_docs(query, k=k)
+        
+        return jsonify({
+            "status": "success",
+            "query": query,
+            "results_count": len(results),
+            "results": results
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": f"Хайлт алдаа: {str(e)}"}), 500
+
+@app.route("/rag/status", methods=["GET"])
+def rag_status():
+    """RAG системийн статус шалгах"""
+    global vector_store
+    
+    status = {
+        "rag_enabled": RAG_ENABLED,
+        "vector_store_exists": vector_store is not None,
+        "vector_store_path": VECTOR_STORE_PATH,
+        "cache_file": CRAWL_CACHE_FILE,
+        "cache_exists": os.path.exists(CRAWL_CACHE_FILE),
+        "max_crawl_pages": CRAWL_MAX_PAGES
+    }
+    
+    # Cache file мэдээлэл
+    if status["cache_exists"]:
+        try:
+            with open(CRAWL_CACHE_FILE, 'r', encoding='utf-8') as f:
+                cached_data = json.load(f)
+                status["cached_pages"] = len(cached_data)
+        except:
+            status["cached_pages"] = "Unknown"
+    
+    # Vector store файлууд шалгах
+    faiss_file = f"{VECTOR_STORE_PATH}.faiss"
+    pkl_file = f"{VECTOR_STORE_PATH}.pkl"
+    status["vector_files"] = {
+        "faiss_exists": os.path.exists(faiss_file),
+        "pkl_exists": os.path.exists(pkl_file)
+    }
+    
+    return jsonify(status), 200
+
+@app.route("/rag/refresh", methods=["POST"])
+def refresh_rag():
+    """Cache цэвэрлэж, шинээр crawl хийж vector store үүсгэх"""
+    if not RAG_ENABLED:
+        return jsonify({"error": "RAG систем идэвхгүй байна"}), 400
+    
+    try:
+        # Cache файл устгах
+        if os.path.exists(CRAWL_CACHE_FILE):
+            os.remove(CRAWL_CACHE_FILE)
+            print(f"🗑️ Cache файл устгалаа: {CRAWL_CACHE_FILE}")
+        
+        # Vector store файлууд устгах
+        for ext in ['.faiss', '.pkl']:
+            file_path = f"{VECTOR_STORE_PATH}{ext}"
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                print(f"🗑️ Vector store файл устгалаа: {file_path}")
+        
+        # Дахин үүсгэх
+        success = build_vector_store()
+        
+        if success:
+            return jsonify({
+                "status": "success", 
+                "message": "RAG систем шинээр үүсгэлээ (Cache цэвэрлэсэн)",
+                "vector_store_path": VECTOR_STORE_PATH
+            }), 200
+        else:
+            return jsonify({"error": "Шинээр үүсгэхэд алдаа гарлаа"}), 500
+            
+    except Exception as e:
+        return jsonify({"error": f"Refresh алдаа: {str(e)}"}), 500
+
+@app.route("/rag/test-query", methods=["POST"])
+def test_query_logic():
+    """RAG системийн асуултын логикийг тест хийх"""
+    global user_query_history, user_last_urls
+    
+    if not RAG_ENABLED:
+        return jsonify({"error": "RAG систем идэвхгүй байна"}), 400
+    
+    try:
+        data = request.json
+        conv_id = data.get("conv_id", "test_conversation")
+        query = data.get("query", "").strip()
+        
+        if not query:
+            return jsonify({"error": "Query заавал байх ёстой"}), 400
+        
+        # Асуултын түүхийг шалгах
+        should_search, reason = should_search_new_content(conv_id, query)
+        
+        # Escalation шалгах
+        should_escalate, escalate_reason = should_escalate_to_support(conv_id, query)
+        
+        # Одоогийн статус
+        current_queries = user_query_history.get(conv_id, [])
+        current_urls = user_last_urls.get(conv_id, [])
+        
+        response = {
+            "status": "success",
+            "conv_id": conv_id,
+            "query": query,
+            "should_search_new": should_search,
+            "search_reason": reason,
+            "should_escalate": should_escalate,
+            "escalate_reason": escalate_reason,
+            "query_history": current_queries,
+            "saved_urls": current_urls,
+            "total_queries": len(current_queries)
+        }
+        
+        # Хэрэв шинэ хайлт хийх бол тест хайлт хийх
+        if should_search and vector_store:
+            search_results = search_cloudmn_docs(query, k=2)
+            response["test_search_results"] = len(search_results)
+            response["test_urls"] = [r['url'] for r in search_results if r['url']]
+        
+        return jsonify(response), 200
+        
+    except Exception as e:
+        return jsonify({"error": f"Тест алдаа: {str(e)}"}), 500
+
+@app.route("/rag/clear-history", methods=["POST"])
+def clear_history():
+    """Асуултын түүх болон URL-ыг цэвэрлэх"""
+    global user_query_history, user_last_urls
+    
+    try:
+        data = request.json
+        conv_id = data.get("conv_id", "all")
+        
+        if conv_id == "all":
+            # Бүгдийг цэвэрлэх
+            cleared_conversations = len(user_query_history)
+            cleared_urls = len(user_last_urls)
+            user_query_history.clear()
+            user_last_urls.clear()
+            
+            return jsonify({
+                "status": "success",
+                "message": "Бүх conversation түүх цэвэрлэгдлээ",
+                "cleared_conversations": cleared_conversations,
+                "cleared_url_maps": cleared_urls
+            }), 200
+        else:
+            # Тодорхой conversation цэвэрлэх
+            queries_removed = len(user_query_history.get(conv_id, []))
+            urls_removed = len(user_last_urls.get(conv_id, []))
+            
+            if conv_id in user_query_history:
+                del user_query_history[conv_id]
+            if conv_id in user_last_urls:
+                del user_last_urls[conv_id]
+            
+            return jsonify({
+                "status": "success",
+                "message": f"Conversation {conv_id} түүх цэвэрлэгдлээ",
+                "queries_removed": queries_removed,
+                "urls_removed": urls_removed
+            }), 200
+            
+    except Exception as e:
+        return jsonify({"error": f"Цэвэрлэх алдаа: {str(e)}"}), 500
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
