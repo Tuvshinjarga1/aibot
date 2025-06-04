@@ -11,6 +11,3 @@ langchain-community
 faiss-cpu
 tiktoken
 gunicorn
-# RAG системийн нэмэлт сангууд зарим төсөлд хэрэгтэй бол
-# chromadb
-# sentence-transformers
