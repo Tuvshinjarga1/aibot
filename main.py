@@ -473,35 +473,6 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
         
         return error_msg
 
-def create_contact_inbox(contact_id, inbox_id, source_id):
-    """Contact-г Inbox-д холбох (source_id = email гэх мэт)"""
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/contact_inboxes"
-    headers = {"api_access_token": CHATWOOT_API_KEY}
-    payload = {
-        "contact_id": contact_id,
-        "inbox_id": inbox_id,
-        "source_id": source_id  # жишээ нь: email, uuid
-    }
-    resp = requests.post(url, json=payload, headers=headers)
-    print(f"📥 ContactInbox create: {resp.status_code} - {resp.text}")
-    resp.raise_for_status()
-    return resp.json()
-
-
-def create_conversation_for_contact(contact_inbox_source_id, inbox_id):
-    """Харгалзах Inbox-д шинэ conversation үүсгэх"""
-    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations"
-    headers = {"api_access_token": CHATWOOT_API_KEY}
-    payload = {
-        "source_id": contact_inbox_source_id,
-        "inbox_id": inbox_id
-    }
-    resp = requests.post(url, json=payload, headers=headers)
-    print(f"💬 Conversation create: {resp.status_code} - {resp.text}")
-    resp.raise_for_status()
-    return resp.json()
-
-
 @app.route("/verify", methods=["GET"])
 def verify_email():
     print("📩 /verify дуудлаа")
@@ -519,9 +490,7 @@ def verify_email():
         email = payload['email']
         conv_id = payload.get('conv_id', None)
 
-        inbox_id = 65547  # 👈 CloudMN inbox ID-г энд тохируул
-
-        # ✅ Step 1: Contact-г verified тэмдэглэх
+        # ✅ Зөвхөн Contact-г verified тэмдэглэх
         update_result = update_contact(contact_id, {
             "email_verified": "1",
             "verified_email": email,
@@ -529,22 +498,9 @@ def verify_email():
         })
         print(f"✅ Contact update: {update_result}")
 
-        # ✅ Step 2: contact_inbox үүсгэх (source_id = email)
-        contact_inbox = create_contact_inbox(contact_id, inbox_id, source_id=email)
-
-        # ✅ Step 3: шинэ conversation эхлүүлэх
-        conv = create_conversation_for_contact(contact_inbox["source_id"], inbox_id)
-        new_conv_id = conv.get("id")
-        print(f"✅ Conversation ID: {new_conv_id}")
-
-        # ✅ Step 4: Thread key reset (optional)
-        thread_key = f"openai_thread_{contact_id}"
-        update_conversation(new_conv_id, {
-            thread_key: None
-        })
-
-        # ✅ Step 5: Амжилтын мессеж илгээх
-        send_to_chatwoot(new_conv_id, f"✅ Таны имэйл хаяг ({email}) амжилттай баталгаажлаа! Chatbot-той харилцана уу.")
+        # ✅ Хэрэв conv_id байгаа бол тэр conversation дээр амжилтын мэдээлэл илгээх
+        if conv_id:
+            send_to_chatwoot(conv_id, f"✅ Таны имэйл хаяг ({email}) амжилттай баталгаажлаа! Одоо chatbot-той харилцах боломжтой боллоо.")
 
         return render_template_string("""
         <!DOCTYPE html>
