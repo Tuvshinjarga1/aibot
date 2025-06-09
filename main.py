@@ -270,8 +270,8 @@ def search_in_crawled_data(query: str, max_results: int = 3):
             scored_pages.append((score, page))
     
     # Sort by score and get top results
-    scored_pages.sort(reverse=True)
-    for _, page in scored_pages[:max_results]:
+    scored_pages.sort(key=lambda x: x[0], reverse=True)  # Sort by score (first element of tuple)
+    for score, page in scored_pages[:max_results]:
         # Find the most relevant snippet
         body = page['body']
         query_words = query_lower.split()
