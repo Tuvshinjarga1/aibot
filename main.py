@@ -47,6 +47,11 @@ ALLOWED_NETLOC = urlparse(ROOT_URL).netloc
 # OpenAI клиент
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# —— Глобал өгөгдөл хадгалах —— #
+crawled_data_cache = []
+last_crawl_time = None
+CRAWL_CACHE_DURATION = 3600  # 1 цаг
+
 # —— Scraping функцууд —— #
 def extract_content(soup: BeautifulSoup, base_url: str):
     main = soup.find("main") or soup
@@ -327,7 +332,7 @@ def analyze_customer_issue(thread_id, current_message, customer_email=None):
         # Илүү тодорхой system prompt
         system_msg = (
             "Та бол дэмжлэгийн мэргэжилтэн. "
-            "Тухайн асуудлыг чадахаар байвал өөрийн мэдлэгийн хүрээнд шийдвэрлэж өгнө үү. "
+            # "Тухайн асуудлыг чадахаар байвал өөрийн мэдлэгийн хүрээнд шийдвэрлэж өгнө үү. "
             "Хэрэглэгчийн бүх чат түүхийг харж, асуудлыг иж бүрэн дүгнэж өгнө үү. "
             "Хэрэв олон асуудал байвал гол асуудлыг тодорхойлж фокуслана уу."
         )
@@ -461,14 +466,99 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
         print(f"❌ Teams мэдээлэл илгээхэд алдаа: {e}")
         return False
 
-def get_ai_response(thread_id, message_content, conv_id=None, customer_email=None, retry_count=0):
-    """OpenAI Assistant-ээс хариулт авах"""
+def get_or_refresh_crawled_data():
+    """Crawl хийсэн өгөгдлийг авах эсвэл шинээр crawl хийх"""
+    global crawled_data_cache, last_crawl_time
+    
+    # Хэрэв кэш хоосон эсвэл хугацаа дууссан бол шинээр crawl хийх
+    current_time = time.time()
+    if not crawled_data_cache or not last_crawl_time or (current_time - last_crawl_time) > CRAWL_CACHE_DURATION:
+        try:
+            print("🔄 Шинээр crawl хийж байна...")
+            crawled_data_cache = crawl_and_scrape(ROOT_URL)
+            last_crawl_time = current_time
+            print(f"✅ {len(crawled_data_cache)} хуудас crawl хийлээ")
+        except Exception as e:
+            print(f"❌ Crawl хийхэд алдаа: {e}")
+            # Хэрэв алдаа гарвал хуучин кэшийг ашиглах
+            if not crawled_data_cache:
+                crawled_data_cache = []
+    
+    return crawled_data_cache
+
+def find_relevant_documentation(user_query, max_results=3):
+    """Хэрэглэгчийн асуултад хамгийн тохирох баримт бичгийг олох"""
     try:
+        crawled_data = get_or_refresh_crawled_data()
+        
+        if not crawled_data:
+            return "Баримт бичгийн мэдээлэл одоогоор байхгүй байна."
+        
+        # OpenAI embedding ашиглан хамгийн тохирох контентыг олох
+        query_lower = user_query.lower()
+        relevant_docs = []
+        
+        # Энгийн keyword matching хийх (embedding-ийн оронд)
+        for doc in crawled_data:
+            title_lower = doc['title'].lower()
+            body_lower = doc['body'].lower()
+            
+            # Keyword-үүд байгаа эсэхийг шалгах
+            score = 0
+            words = query_lower.split()
+            
+            for word in words:
+                if len(word) > 2:  # 2-с дээш тэмдэгттэй үгс
+                    if word in title_lower:
+                        score += 3  # Title дэх тохиролд илүү өндөр оноо
+                    if word in body_lower:
+                        score += 1  # Body дэх тохиролд бага оноо
+            
+            if score > 0:
+                relevant_docs.append({
+                    'doc': doc,
+                    'score': score
+                })
+        
+        # Оноогоор эрэмбэлэх
+        relevant_docs.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Хамгийн тохирох документуудыг буцаах
+        if relevant_docs:
+            result_text = "📚 Холбогдох баримт бичиг:\n\n"
+            
+            for i, item in enumerate(relevant_docs[:max_results]):
+                doc = item['doc']
+                result_text += f"🔗 **{doc['title']}**\n"
+                result_text += f"URL: {doc['url']}\n"
+                # Body-ийн эхний хэсгийг авах (хэт урт болохоос сэргийлэх)
+                body_preview = doc['body'][:500] + "..." if len(doc['body']) > 500 else doc['body']
+                result_text += f"Агуулга: {body_preview}\n\n"
+            
+            return result_text
+        else:
+            return "Таны асуултад тохирох баримт бичиг олдсонгүй."
+            
+    except Exception as e:
+        print(f"❌ Баримт бичиг хайхад алдаа: {e}")
+        return "Баримт бичиг хайхад алдаа гарлаа."
+
+def get_ai_response_with_docs(thread_id, message_content, conv_id=None, customer_email=None, retry_count=0):
+    """OpenAI Assistant-ээс хариулт авах + crawl хийсэн мэдээлэл ашиглах"""
+    try:
+        # Баримт бичгээс холбогдох мэдээлэл хайх
+        relevant_docs = find_relevant_documentation(message_content)
+        
+        # Хэрэв баримт бичиг олдвол хэрэглэгчийн мессежид нэмэх
+        enhanced_message = message_content
+        if "олдсонгүй" not in relevant_docs and "алдаа гарлаа" not in relevant_docs:
+            enhanced_message = f"{message_content}\n\n{relevant_docs}"
+        
         # Хэрэглэгчийн мессежийг thread руу нэмэх
         client.beta.threads.messages.create(
             thread_id=thread_id,
             role="user",
-            content=message_content
+            content=enhanced_message
         )
 
         # Assistant run үүсгэх
@@ -743,7 +833,7 @@ def webhook():
         ai_response = None
         
         while retry_count <= MAX_AI_RETRIES:
-            ai_response = get_ai_response(thread_id, message_content, conv_id, verified_email, retry_count)
+            ai_response = get_ai_response_with_docs(thread_id, message_content, conv_id, verified_email, retry_count)
             
             # Хэрэв алдаатай хариулт биш бол амжилттай
             if not any(error_phrase in ai_response for error_phrase in [
@@ -1028,6 +1118,89 @@ def scrape():
 def crawl():
     pages = crawl_and_scrape(ROOT_URL)
     return jsonify(pages)
+
+
+@app.route("/api/refresh-crawl", methods=["POST"])
+def refresh_crawl():
+    """Crawl кэшийг шинэчлэх"""
+    global crawled_data_cache, last_crawl_time
+    try:
+        print("🔄 Manual crawl refresh...")
+        crawled_data_cache = crawl_and_scrape(ROOT_URL)
+        last_crawl_time = time.time()
+        return jsonify({
+            "status": "success", 
+            "message": f"✅ {len(crawled_data_cache)} хуудас шинээр crawl хийлээ",
+            "pages_count": len(crawled_data_cache)
+        }), 200
+    except Exception as e:
+        return jsonify({"error": f"Crawl refresh алдаа: {str(e)}"}), 500
+
+
+@app.route("/api/search-docs", methods=["POST"])
+def search_docs():
+    """Баримт бичгээс хайх"""
+    try:
+        data = request.get_json(force=True)
+        query = data.get("query")
+        max_results = data.get("max_results", 5)
+        
+        if not query:
+            return jsonify({"error": "Missing 'query' in JSON body"}), 400
+        
+        result = find_relevant_documentation(query, max_results)
+        
+        return jsonify({
+            "query": query,
+            "result": result,
+            "cache_info": {
+                "cached_pages": len(crawled_data_cache),
+                "last_crawl": datetime.fromtimestamp(last_crawl_time).isoformat() if last_crawl_time else None
+            }
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": f"Хайлт хийхэд алдаа: {str(e)}"}), 500
+
+
+@app.route("/api/crawl-status", methods=["GET"])
+def crawl_status():
+    """Crawl статус шалгах"""
+    return jsonify({
+        "cached_pages": len(crawled_data_cache),
+        "last_crawl": datetime.fromtimestamp(last_crawl_time).isoformat() if last_crawl_time else None,
+        "cache_duration_hours": CRAWL_CACHE_DURATION / 3600,
+        "root_url": ROOT_URL
+    })
+
+
+@app.route("/api/test-ai-docs", methods=["POST"])
+def test_ai_docs():
+    """AI + баримт бичгийн нэгдсэн систем тест хийх"""
+    try:
+        data = request.get_json(force=True)
+        query = data.get("query", "Хэрхэн ашиглах вэ?")
+        
+        # Баримт бичгээс холбогдох мэдээлэл хайх
+        relevant_docs = find_relevant_documentation(query)
+        
+        # Хэрэглэгчийн мессежийг сайжруулах
+        enhanced_message = query
+        if "олдсонгүй" not in relevant_docs and "алдаа гарлаа" not in relevant_docs:
+            enhanced_message = f"{query}\n\n{relevant_docs}"
+        
+        return jsonify({
+            "original_query": query,
+            "enhanced_message": enhanced_message,
+            "found_docs": "олдсонгүй" not in relevant_docs and "алдаа гарлаа" not in relevant_docs,
+            "crawl_status": {
+                "cached_pages": len(crawled_data_cache),
+                "last_crawl": datetime.fromtimestamp(last_crawl_time).isoformat() if last_crawl_time else None
+            }
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": f"Тест хийхэд алдаа: {str(e)}"}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
