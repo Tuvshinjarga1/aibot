@@ -756,7 +756,7 @@ def force_crawl():
                 "pages_crawled": len(crawled_data),
                 "crawl_status": crawl_status
             })
-    else:
+        else:
             crawl_status = {"status": "failed", "message": "Force crawl failed - no pages found"}
             return jsonify({"error": "No pages were crawled"}), 500
             
