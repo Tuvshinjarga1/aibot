@@ -818,37 +818,41 @@ def chatwoot_webhook():
         memory = conversation_memory.get(conv_id, [])
         if memory and "pending_confirmation" in memory[-1].get("content", ""):
             # Use GPT to understand the response
-            confirmation_response = client.chat.completions.create(
-                model="gpt-4",
+            try:
+                confirmation_response = client.chat.completions.create(
+                    model="gpt-4",
                     messages=[
-                    {
-                        "role": "system",
-                        "content": """Та хэрэглэгчийн хариултыг дүгнэж, зөвшөөрөл эсвэл татгалзлыг тодорхойлох ёстой.
-                        Хариултад 'yes' эсвэл 'no' гэж бичнэ үү."""
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Хэрэглэгчийн хариулт: {text}\n\nЭнэ нь зөвшөөрөл мөн үү, эсвэл татгалзвал мөн үү?"
-                    }
-                ],
-                max_tokens=10,
-                temperature=0.3
-            )
-            
-            is_confirmed = confirmation_response.choices[0].message.content.strip().lower() == "yes"
-            
-            if is_confirmed:
-                # Send to Teams with confirmation
-                send_teams_notification(
-                    conv_id,
-                    f"AI хариулт: {memory[-2]['content']}\n\nХэрэглэгчийн асуулт: {memory[-3]['content']}",
-                    "outgoing",
-                    is_unsolved=True,
-                    confirmed=True
+                        {
+                            "role": "system",
+                            "content": """Та хэрэглэгчийн хариултыг дүгнэж, зөвшөөрөл эсвэл татгалзлыг тодорхойлох ёстой.
+                            Хариултад 'yes' эсвэл 'no' гэж бичнэ үү."""
+                        },
+                        {
+                            "role": "user",
+                            "content": f"Хэрэглэгчийн хариулт: {text}\n\nЭнэ нь зөвшөөрөл мөн үү, эсвэл татгалзвал мөн үү?"
+                        }
+                    ],
+                    max_tokens=10,
+                    temperature=0.3
                 )
-                send_to_chatwoot(conv_id, "✅ Баярлалаа! Таны асуудлыг дэмжлэгийн баг руу илгээлээ. Тун удахгүй холбогдох болно.")
-            else:
-                send_to_chatwoot(conv_id, "✅ Ойлголоо. Таны асуудлыг дэмжлэгийн баг руу илгээхгүй байх болно.")
+                
+                is_confirmed = confirmation_response.choices[0].message.content.strip().lower() == "yes"
+                
+                if is_confirmed:
+                    # Send to Teams with confirmation
+                    send_teams_notification(
+                        conv_id,
+                        f"AI хариулт: {memory[-2]['content']}\n\nХэрэглэгчийн асуулт: {memory[-3]['content']}",
+                        "outgoing",
+                        is_unsolved=True,
+                        confirmed=True
+                    )
+                    send_to_chatwoot(conv_id, "✅ Баярлалаа! Таны асуудлыг дэмжлэгийн баг руу илгээлээ. Тун удахгүй холбогдох болно.")
+                else:
+                    send_to_chatwoot(conv_id, "✅ Ойлголоо. Таны асуудлыг дэмжлэгийн баг руу илгээхгүй байх болно.")
+            except Exception as e:
+                logging.error(f"Error processing confirmation response: {e}")
+                send_to_chatwoot(conv_id, "✅ Ойлголоо. Таны хариултыг боловсруулахад алдаа гарлаа.")
         else:
             # General AI conversation
             # send_to_chatwoot(conv_id, "🤔 Боловсруулж байна...")
@@ -926,7 +930,7 @@ def force_crawl():
                 "pages_crawled": len(crawled_data),
                 "crawl_status": crawl_status
             })
-    else:
+        else:
             crawl_status = {"status": "failed", "message": "Force crawl failed - no pages found"}
             return jsonify({"error": "No pages were crawled"}), 500
             
