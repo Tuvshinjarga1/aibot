@@ -550,9 +550,6 @@ def chatwoot_webhook():
     
     logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
     
-    # Send notification to Teams
-    send_teams_notification(conv_id, text, "incoming")
-    
     # Handle different commands
     if text.lower() == "crawl":
         # Check if auto-crawl already completed
@@ -708,12 +705,11 @@ def chatwoot_webhook():
                 send_to_chatwoot(conv_id, "✅ Ойлголоо. Таны асуудлыг дэмжлэгийн баг руу илгээхгүй байх болно.")
         else:
             # General AI conversation
-            send_to_chatwoot(conv_id)
             # send_to_chatwoot(conv_id, "🤔 Боловсруулж байна...")
             ai_response = get_ai_response(text, conv_id, crawled_data)
             send_to_chatwoot(conv_id, ai_response)
             
-            # Check if AI couldn't help
+            # Check if AI couldn't help (only send to Teams if there's an issue)
             if any(keyword in ai_response.lower() for keyword in ["ойлгомжгүй", "тодорхойгүй", "алдаа", "саад"]):
                 # Ask for confirmation before sending to Teams
                 confirmation_message = f"""
@@ -732,7 +728,7 @@ AI хариулт: {ai_response}
                     conversation_memory[conv_id] = []
                 conversation_memory[conv_id].append({"role": "assistant", "content": confirmation_message + " pending_confirmation"})
                 
-                # Send to Teams as pending confirmation
+                # Send to Teams as pending confirmation (ONLY for unresolved issues)
                 send_teams_notification(
                     conv_id,
                     f"AI хариулт: {ai_response}\n\nХэрэглэгчийн асуулт: {text}",
@@ -740,12 +736,7 @@ AI хариулт: {ai_response}
                     is_unsolved=True,
                     confirmed=False
                 )
-            else:
-                send_teams_notification(
-                    conv_id,
-                    f"💬 {contact_name}-ийн асуулт: {text}\n\n🤖 AI хариулт: {ai_response}",
-                    "outgoing"
-                )
+            # Do NOT send to Teams for successful AI responses
 
     return jsonify({"status": "success"}), 200
 
