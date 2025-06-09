@@ -327,6 +327,96 @@ def scrape_single(url: str):
     return {"url": url, "title": title, "body": body, "images": images}
 
 
+# —— AI Analysis Functions —— #
+def analyze_user_message_with_ai(user_message: str, ai_response: str, conv_id: int):
+    """Use AI to analyze if user needs support team or matches services"""
+    if not client:
+        return {"needs_support": False, "matching_services": [], "confidence": 0}
+    
+    try:
+        # Create service list for AI analysis
+        service_list = "\n".join([f"- {key}" for key in SERVICE_PRICES.keys()])
+        
+        analysis_prompt = f"""
+Хэрэглэгчийн асуулт болон AI хариултыг дүгнэж, дараах асуултуудад хариулна уу:
+
+1. Хэрэглэгч дэмжлэгийн багтай холбогдох шаардлагатай юу? (техникийн асуудал, төвөгтэй асуудал, AI хариулт хангалтгүй)
+2. Хэрэглэгчийн асуулт дараах үйлчилгээнүүдтэй тохирч байна уу?
+
+Үйлчилгээний жагсаалт:
+{service_list}
+
+Хэрэглэгчийн асуулт: {user_message}
+AI хариулт: {ai_response}
+
+Хариултаа JSON форматаар өг:
+{{
+    "needs_support": true/false,
+    "confidence": 0-100,
+    "reason": "яагаад дэмжлэг хэрэгтэй болох шалтгаан",
+    "matching_services": ["тохирох үйлчилгээний нэр1", "тохирох үйлчилгээний нэр2"],
+    "suggested_action": "санал болгох үйлдэл"
+}}
+        """
+        
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "Та мэргэжлийн дүгнэлт хийгч. Хэрэглэгчийн хэрэгцээг тодорхойлж, зөв шийдэл санал болгож чаддаг."
+                },
+                {
+                    "role": "user", 
+                    "content": analysis_prompt
+                }
+            ],
+            max_tokens=300,
+            temperature=0.3
+        )
+        
+        analysis_text = response.choices[0].message.content.strip()
+        
+        # Try to parse JSON response
+        import re
+        json_match = re.search(r'\{.*\}', analysis_text, re.DOTALL)
+        if json_match:
+            analysis_json = json.loads(json_match.group())
+            return analysis_json
+        else:
+            # Fallback analysis
+            return {
+                "needs_support": any(keyword in user_message.lower() for keyword in ["алдаа", "ажилахгүй", "асуудал", "тусламж"]),
+                "matching_services": [],
+                "confidence": 50,
+                "reason": "JSON parse хийх боломжгүй",
+                "suggested_action": "Manual review шаардлагатай"
+            }
+            
+    except Exception as e:
+        logging.error(f"AI analysis алдаа: {e}")
+        return {"needs_support": False, "matching_services": [], "confidence": 0}
+
+def suggest_services_from_analysis(matching_services: list):
+    """Generate service suggestions based on analysis"""
+    if not matching_services:
+        return ""
+    
+    suggestions = "💡 **Таны асуудалтай холбоотой үйлчилгээнүүд:**\n\n"
+    
+    for service_name in matching_services:
+        if service_name in SERVICE_PRICES:
+            service_info = SERVICE_PRICES[service_name]
+            suggestions += f"🔧 **{service_name}**\n"
+            suggestions += f"   💰 Үнэ: {service_info['price']}\n"
+            suggestions += f"   📝 Тайлбар: {service_info['desc']}\n\n"
+    
+    suggestions += "📞 Эдгээр үйлчилгээний талаар дэлгэрэнгүй мэдээлэл авахыг хүсвэл 'дэмжлэг' гэж бичнэ үү."
+    return suggestions
+
+# —— Enhanced AI Response with Smart Analysis —— #
+
+
 # —— Enhanced Chatwoot Integration —— #
 def send_to_chatwoot(conv_id: int, content: str, message_type: str = "outgoing"):
     """Enhanced chatwoot message sending with better error handling"""
@@ -427,7 +517,7 @@ def send_to_teams(message: str, title: str = "Cloud.mn AI Assistant", color: str
         logging.error(f"Failed to send message to Teams: {e}")
         return False
 
-def send_teams_notification(conv_id: int, message: str, message_type: str = "outgoing", is_unsolved: bool = False, confirmed: bool = False):
+def send_teams_notification(conv_id: int, message: str, message_type: str = "outgoing", is_unsolved: bool = False, confirmed: bool = False, user_email: str = None):
     """Send notification to Teams about new conversation or message"""
     if not TEAMS_WEBHOOK_URL:
         return
@@ -444,6 +534,9 @@ def send_teams_notification(conv_id: int, message: str, message_type: str = "out
         
         # Only send to Teams if confirmed
         if confirmed:
+            # Get email from conversation or use contact email as fallback
+            display_email = user_email if user_email else contact_email
+            
             # Create Teams message with simpler format
             teams_message = f"""
 Cloud.mn AI - {contact_name}
@@ -453,7 +546,7 @@ Cloud.mn AI - {contact_name}
 
 Хэрэглэгч:
 Нэр: {contact_name}
-Имэйл: {contact_email}
+Имэйл: {display_email}
 Харилцан ярианы ID: {conv_id}
 
 Алдаа: {message}
@@ -650,17 +743,17 @@ def chatwoot_webhook():
             # Use GPT to understand the response
             confirmation_response = client.chat.completions.create(
                 model="gpt-4",
-                    messages=[
-                    {
-                        "role": "system",
-                        "content": """Та хэрэглэгчийн хариултыг дүгнэж, зөвшөөрөл эсвэл татгалзлыг тодорхойлох ёстой.
-                        Хариултад 'yes' эсвэл 'no' гэж бичнэ үү."""
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Хэрэглэгчийн хариулт: {text}\n\nЭнэ нь зөвшөөрөл мөн үү, эсвэл татгалзвал мөн үү?"
-                    }
-                    ],
+                messages=[
+                {
+                    "role": "system",
+                    "content": """Та хэрэглэгчийн хариултыг дүгнэж, зөвшөөрөл эсвэл татгалзлыг тодорхойлох ёстой.
+                    Хариултад 'yes' эсвэл 'no' гэж бичнэ үү."""
+                },
+                {
+                    "role": "user",
+                    "content": f"Хэрэглэгчийн хариулт: {text}\n\nЭнэ нь зөвшөөрөл мөн үү, эсвэл татгалзвал мөн үү?"
+                }
+                ],
                 max_tokens=10,
                 temperature=0.3
             )
@@ -668,31 +761,93 @@ def chatwoot_webhook():
             is_confirmed = confirmation_response.choices[0].message.content.strip().lower() == "yes"
             
             if is_confirmed:
-                # Send to Teams with confirmation
-                send_teams_notification(
-                    conv_id,
-                    f"AI хариулт: {memory[-2]['content']}\n\nХэрэглэгчийн асуулт: {memory[-3]['content']}",
-                    "outgoing",
-                    is_unsolved=True,
-                    confirmed=True
-                )
-                send_to_chatwoot(conv_id, "✅ Баярлалаа! Таны асуудлыг дэмжлэгийн баг руу илгээлээ. Тун удахгүй холбогдох болно.")
+                # Email хаяг асуух
+                email_request = """
+✅ Баярлалаа! Таны асуудлыг дэмжлэгийн багтай хуваалцахын тулд email хаягаа өгнө үү?
+
+📧 **Email хаяг оруулна уу:**
+Жишээ: example@gmail.com
+
+Энэ нь дэмжлэгийн багт танай холбогдох мэдээллийг илгээхэд ашиглагдана.
+                """
+                send_to_chatwoot(conv_id, email_request)
+                
+                # Mark as waiting for email
+                conversation_memory[conv_id].append({"role": "assistant", "content": "waiting_for_email"})
             else:
                 send_to_chatwoot(conv_id, "✅ Ойлголоо. Таны асуудлыг дэмжлэгийн баг руу илгээхгүй байх болно.")
+                
+        # Check if waiting for email address
+        elif memory and "waiting_for_email" in memory[-1].get("content", ""):
+            # Allow user to cancel email request
+            if text.lower() in ["цуцлах", "cancel", "үгүй", "no", "болих"]:
+                send_to_chatwoot(conv_id, "✅ Email хаяг өгөх хүсэлтийг цуцаллаа. Та дараа дахин хүсэлт илгээж болно.")
+                # Clear waiting state
+                conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] if "waiting_for_email" not in msg.get("content", "")]
+                return jsonify({"status": "success"}), 200
+            
+            # Validate email format
+            import re
+            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+            
+            if re.match(email_pattern, text.strip()):
+                user_email = text.strip()
+                
+                # Get the original question and AI response
+                original_question = None
+                ai_response = None
+                
+                for i, msg in enumerate(memory):
+                    if "pending_confirmation" in msg.get("content", ""):
+                        if i >= 2:
+                            ai_response = memory[i-1].get("content", "")
+                            original_question = memory[i-2].get("content", "")
+                        break
+                
+                # Send to Teams with email
+                send_teams_notification(
+                    conv_id,
+                    f"AI хариулт: {ai_response}\n\nХэрэглэгчийн асуулт: {original_question}\n\nИмэйл хаяг: {user_email}",
+                    "outgoing",
+                    is_unsolved=True,
+                    confirmed=True,
+                    user_email=user_email
+                )
+                
+                send_to_chatwoot(conv_id, f"✅ Баярлалаа! Таны асуудлыг ({user_email}) дэмжлэгийн баг руу илгээлээ. Тун удахгүй холбогдох болно.")
+                
+                # Clear waiting state
+                conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] if "waiting_for_email" not in msg.get("content", "")]
+                
+            else:
+                send_to_chatwoot(conv_id, "❌ Буруу email хэлбэр байна. Зөв email хаяг оруулна уу (жишээ: example@gmail.com)\n\n💡 'цуцлах' гэж бичвэл email өгөхгүйгээр гарж болно.")
+                
         else:
             # General AI conversation
             # send_to_chatwoot(conv_id, "🤔 Боловсруулж байна...")
             ai_response = get_ai_response(text, conv_id, crawled_data)
             send_to_chatwoot(conv_id, ai_response)
             
-            # Check if AI couldn't help
-            if any(keyword in ai_response.lower() for keyword in ["ойлгомжгүй", "тодорхойгүй", "алдаа", "саад"]):
-                # Ask for confirmation before sending to Teams
+            # Smart AI Analysis - дүгнэлт хийх
+            analysis = analyze_user_message_with_ai(text, ai_response, conv_id)
+            
+            # Холбогдох үйлчилгээ санал болгох
+            if analysis.get("matching_services"):
+                service_suggestions = suggest_services_from_analysis(analysis["matching_services"])
+                if service_suggestions:
+                    send_to_chatwoot(conv_id, service_suggestions)
+            
+            # Дэмжлэгийн багтай холбогдох шаардлагатай эсэхийг шалгах
+            needs_support = analysis.get("needs_support", False)
+            confidence = analysis.get("confidence", 0)
+            
+            if needs_support and confidence > 60:
+                # Өндөр итгэлтэйгээр дэмжлэг хэрэгтэй гэж үзэж байвал
                 confirmation_message = f"""
-❓ Таны асуудлыг шийдвэрлэхэд хүндрэлтэй байна. Дэмжлэгийн баг руу илгээх үү?
+❓ Таны асуудлыг шийдвэрлэхэд мэргэжлийн дэмжлэг шаардлагатай байх магадлалтай. Дэмжлэгийн баг руу илгээх үү?
 
-Асуулт: {text}
-AI хариулт: {ai_response}
+🔍 **Дүгнэлт:** {analysis.get('reason', 'Техникийн дэмжлэг шаардлагатай')}
+📊 **Итгэлийн түвшин:** {confidence}%
 
 Зөвшөөрч байвал "тийм" эсвэл "зөвшөөрч байна" гэж бичнэ үү.
 Зөвшөөрөхгүй бол "үгүй" эсвэл "зөвшөөрөхгүй" гэж бичнэ үү.
@@ -704,15 +859,30 @@ AI хариулт: {ai_response}
                     conversation_memory[conv_id] = []
                 conversation_memory[conv_id].append({"role": "assistant", "content": confirmation_message + " pending_confirmation"})
                 
-                # Send to Teams as pending confirmation
-                send_teams_notification(
-                    conv_id,
-                    f"AI хариулт: {ai_response}\n\nХэрэглэгчийн асуулт: {text}",
-                    "outgoing",
-                    is_unsolved=True,
-                    confirmed=False
-                )
-            # Do NOT send to Teams for successful AI responses
+            elif needs_support and confidence > 30:
+                # Дунд зэргийн итгэлтэйгээр илүү мэдээлэл асуух
+                clarification_message = f"""
+🤔 Танай асуудлыг илүү сайн ойлгохын тулд нэмэлт мэдээлэл хэрэгтэй байна.
+
+📋 **Дэлгэрэнгүй мэдээлэл өгнө үү:**
+• Ямар алдаа гарч байна?
+• Хэзээнээс эхэлсэн асуудал вэ?
+• Ямар системд/серверт асуудал гарч байна?
+
+Эсвэл "дэмжлэг" гэж бичвэл мэргэжлийн баг руу холбож өгөх болно.
+                """
+                send_to_chatwoot(conv_id, clarification_message)
+            
+            # Шаардлагагүй бол Teams рүү илгээхгүй
+            # Зөвхөн үндсэн AI хариулт л хангалттай
+
+    # Үйлчилгээний үнэ харуулах
+    services = get_services_in_text(text)
+    if services:
+        price_msg = "💡 Та дараах үйлчилгээ(үүд)-ийн үнийн мэдээлэл:\n"
+        for key, info in services:
+            price_msg += f"\n• {info['desc']}\n   ➡️ Үнэ: {info['price']}\n"
+        send_to_chatwoot(conv_id, price_msg)
 
     return jsonify({"status": "success"}), 200
 
@@ -827,6 +997,145 @@ def health_check():
             "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID)
         }
     })
+
+
+# 1. Үйлчилгээний нэрсийн жагсаалт - SERVICE_PRICES-тэй тохирох
+SERVICE_KEYWORDS = [
+    "Nginx", "apache2", "httpd", "php", "wordpress", "phpMyAdmin", "сервер суулгах", "сервис суулгах",
+    "Database", "SQL", "NoSQL", "өгөгдлийн сан",
+    "VPN тохируулах", "VPN", "виртуал нэтворк",
+    "Хэрэглэгч хооронд сервер зөөх", "сервер зөөх", "файл зөөх", "migration",
+    "Windows сервер", "Windows лиценз", "лиценз тохируулах",
+    "серверийг үүсгэж өгөх", "порт тохируулах", "firewall", "network",
+    "DNS record", "DNS тохируулах", "домэйн",
+    "мэйл сервер", "email server", "smtp", "pop3", "imap",
+    "нууц үг сэргээх", "password reset", "хандалт сэргээх",
+    "SSL тохируулах", "SSL сертификат", "HTTPS", "шифрлэлт",
+    "нүүдэл сэргээх", "backup restore", "сэргээх",
+    "файл хуулах", "local руу хуулах", "download", "file transfer",
+    "сүлжээний алдаа", "network error", "connectivity issue",
+    "аюулгүй байдал", "security", "аудит", "log цуглуулах",
+    "физик сервер", "VPS", "виртуал машин", "клауд сервер",
+    "технологийн зөвлөх", "consulting", "зөвлөгөө",
+    "серверийн алдаа", "system error", "debugging", "troubleshooting"
+]
+
+# 2. Дэмжлэг хүссэн түлхүүр үгс
+SUPPORT_KEYWORDS = [
+    "дэмжлэг", "support", "тусламж", "зөвлөгөө", "холбогдох", "operator", "help", "админ",
+    "алдаа", "асуудал", "problem", "issue", "bug", "ажилахгүй", "broken"
+]
+
+def contains_service_or_support(text):
+    """Enhanced service and support detection"""
+    text_lower = text.lower()
+    found_service = any(service.lower() in text_lower for service in SERVICE_KEYWORDS)
+    found_support = any(word in text_lower for word in SUPPORT_KEYWORDS)
+    return found_service or found_support
+
+def get_services_in_text(text):
+    """Enhanced service detection in text"""
+    found = []
+    text_lower = text.lower()
+    
+    for key, info in SERVICE_PRICES.items():
+        # Check if service name or related keywords are mentioned
+        service_keywords = key.lower().split()
+        if any(keyword in text_lower for keyword in service_keywords):
+            found.append((key, info))
+        
+        # Also check SERVICE_KEYWORDS for broader matching
+        for keyword in SERVICE_KEYWORDS:
+            if keyword.lower() in text_lower and keyword.lower() in key.lower():
+                if (key, info) not in found:
+                    found.append((key, info))
+    
+    return found
+
+
+# —— New Service Prices —— #
+SERVICE_PRICES = {
+    "Nginx, apache2, httpd, php, wordpress, phpMyAdmin зэрэг сервис суулгах": {
+        "price": "Ажлын цагаар 55,000₮, Ажлын бус цагаар 88,000₮",
+        "desc": "Nginx, apache2, httpd, php, wordpress, phpMyAdmin зэрэг сервис суулгах",
+        "server_inside": True, "server_outside": False, "duration": "10min per service only for installation"
+    },
+    "Database, SQL, NoSQL сервис суулгах": {
+        "price": "Ажлын цагаар 55,000₮, Ажлын бус цагаар 88,000₮",
+        "desc": "Database, SQL, NoSQL сервис суулгах",
+        "server_inside": True, "server_outside": False, "duration": "10min per service only for installation"
+    },
+    "VPN тохируулах": {
+        "price": "Ажлын цагаар 88,000₮, Ажлын бус цагаар 110,000₮",
+        "desc": "VPN тохируулах",
+        "server_inside": True, "server_outside": False, "duration": "60-120"
+    },
+    "Хэрэглэгч хооронд сервер зөөх": {
+        "price": "Ажлын цагаар 55,000₮, Ажлын бус цагаар 88,000₮",
+        "desc": "Хэрэглэгч хооронд сүлжээ зөөх",
+        "server_inside": True, "server_outside": False, "duration": "Дискийн хэмжээнээс хамаарна. 20min for 15GB"
+    },
+    "Windows сервер дээр лиценз тохируулах": {
+        "price": "Ажлын цагаар 55,000₮, Ажлын бус цагаар 88,000₮",
+        "desc": "Windows сервер дээр шинээр тохируулах",
+        "server_inside": True, "server_outside": False, "duration": "30-60"
+    },
+    "Хэрэглэгчийн серверийг үүсгэж өгөх, порт тохируулах": {
+        "price": "Ажлын цагаар 55,000₮, Ажлын бус цагаар 88,000₮",
+        "desc": "Хэрэглэгчийн серверийн үүрэг, порт тохируулах",
+        "server_inside": True, "server_outside": False, "duration": "20"
+    },
+    "DNS record тохируулах": {
+        "price": "Ажлын цагаар 33,000₮, Ажлын бус цагаар 55,000₮",
+        "desc": "DNS record тохируулах",
+        "server_inside": True, "server_outside": False, "duration": "30-60"
+    },
+    "Мэйл сервер дээр туслалцаа үзүүлэх": {
+        "price": "Ажлын цагаар 55,000₮, Ажлын бус цагаар 88,000₮",
+        "desc": "Серверээс өгөгдөл сэргээх",
+        "server_inside": True, "server_outside": False, "duration": "30 +"
+    },
+    "Хэрэглэгчийн нууц үг сэргээх": {
+        "price": "Ажлын цагаар 55,000₮, Ажлын бус цагаар 88,000₮",
+        "desc": "Хэрэглэгчийн нүүгдэл сэргээх",
+        "server_inside": True, "server_outside": False, "duration": "30 +"
+    },
+    "SSL тохируулах": {
+        "price": "Ажлын цагаар 55,000₮, Ажлын бус цагаар 88,000₮",
+        "desc": "SSL тохируулах",
+        "server_inside": True, "server_outside": False, "duration": "30-60"
+    },
+    "Хэрэглэгчийн нүүдэл сэргээх": {
+        "price": "Ажлын цагаар 55,000₮, Ажлын бус цагаар 88,000₮",
+        "desc": "Хэрэглэгчийн нүүдэл сэргээх",
+        "server_inside": True, "server_outside": False, "duration": "30 +"
+    },
+    "Клауд серверээс local руу файл хуулах": {
+        "price": "Ажлын цагаар 77,000₮, Ажлын бус цагаар 110,000₮",
+        "desc": "Клауд серверээс local руу файл хуулах",
+        "server_inside": True, "server_outside": False, "duration": "Файлын хэмжээ, интернетийн хурднаас хамаарна. Урьдчилан хугацаа тодорхойлох боломжгүй."
+    },
+    "Сүлжээний буруу тохиргооноос үүссэн алдаа засварлах": {
+        "price": "Ажлын цагаар 55,000₮, Ажлын бус цагаар 88,000₮",
+        "desc": "Сүлжээний буруу тохиргооноос үүссэн алдаа засварлах",
+        "server_inside": True, "server_outside": False, "duration": "Алдааны хэмжээнээс хамаарна. Урьдчилан хугацаа тодорхойлох боломжгүй."
+    },
+    "Физик сервер, VPS болон бусад клауд виртуал машин/сервер үүсгэх": {
+        "price": "Ажлын цагаар 110,000₮, Ажлын бус цагаар 132,000₮",
+        "desc": "Физик сервер, VPS болон бусад клауд виртуал машин/сервер үүсгэх",
+        "server_inside": False, "server_outside": True, "duration": "хамаарна"
+    },
+    "Технологийн бусад төрлийн зөвлөх үйлчилгээ": {
+        "price": "Ажлын цагаар 110,000₮, Ажлын бус цагаар 132,000₮",
+        "desc": "Технологийн бусад төрлийн зөвлөх үйлчилгээ",
+        "server_inside": True, "server_outside": True, "duration": "60"
+    },
+    "Нийлүүлэгчээс шаардлагатай серверийн дотоод алдаа илрүүлэх, засварлах": {
+        "price": "110,000₮ (ажлын цагаар), 132,000₮ (ажлын бус цагаар)",
+        "desc": "Нийлүүлэгчээс шаардлагатай серверийн дотоод алдаа илрүүлэх, засварлах",
+        "server_inside": True, "server_outside": False, "duration": "Алдааны хэмжээнээс хамаарна, урьдчилан хугацаа тодорхойлох боломжгүй."
+    }
+}
 
 
 if __name__ == "__main__":
