@@ -31,6 +31,48 @@ conversation_memory = {}
 crawled_data = []
 crawl_status = {"status": "not_started", "message": "Crawling has not started yet"}
 
+# —— Crawl & Scrape —— #
+def crawl_and_scrape(start_url: str):
+    visited = set()
+    to_visit = {start_url}
+    results = []
+
+    while to_visit and len(visited) < MAX_CRAWL_PAGES:
+        url = to_visit.pop()
+        if url in visited:
+            continue
+        visited.add(url)
+
+        try:
+            logging.info(f"[Crawling] {url}")
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+        except Exception as e:
+            logging.warning(f"Failed to fetch {url}: {e}")
+            continue
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        title = soup.title.string.strip() if soup.title else url
+        body, images = extract_content(soup, url)
+
+        results.append({
+            "url": url,
+            "title": title,
+            "body": body,
+            "images": images
+        })
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if is_internal_link(href):
+                full = normalize_url(url, href)
+                if full.startswith(ROOT_URL) and full not in visited:
+                    to_visit.add(full)
+
+        time.sleep(DELAY_SEC)
+
+    return results
+
 # —— Startup Functions —— #
 def auto_crawl_on_startup():
     """Automatically crawl the site on startup"""
@@ -98,49 +140,6 @@ def is_internal_link(href: str) -> bool:
 
 def normalize_url(base: str, link: str) -> str:
     return urljoin(base, link.split("#")[0])
-
-
-# —— Crawl & Scrape —— #
-def crawl_and_scrape(start_url: str):
-    visited = set()
-    to_visit = {start_url}
-    results = []
-
-    while to_visit and len(visited) < MAX_CRAWL_PAGES:
-        url = to_visit.pop()
-        if url in visited:
-            continue
-        visited.add(url)
-
-        try:
-            logging.info(f"[Crawling] {url}")
-            resp = requests.get(url, timeout=10)
-            resp.raise_for_status()
-        except Exception as e:
-            logging.warning(f"Failed to fetch {url}: {e}")
-            continue
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-        title = soup.title.string.strip() if soup.title else url
-        body, images = extract_content(soup, url)
-
-        results.append({
-            "url": url,
-            "title": title,
-            "body": body,
-            "images": images
-        })
-
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if is_internal_link(href):
-                full = normalize_url(url, href)
-                if full.startswith(ROOT_URL) and full not in visited:
-                    to_visit.add(full)
-
-        time.sleep(DELAY_SEC)
-
-    return results
 
 def scrape_single(url: str):
     resp = requests.get(url, timeout=10)
