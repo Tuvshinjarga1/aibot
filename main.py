@@ -152,7 +152,7 @@ def scrape_single(url: str):
 
 # —— AI Assistant Functions —— #
 def get_ai_response(user_message: str, conversation_id: int, context_data: list = None):
-    """Enhanced AI response with context awareness"""
+    """Enhanced AI response with better context awareness"""
     
     if not client:
         return "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
@@ -163,14 +163,27 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     # Build context from crawled data if available
     context = ""
     if context_data and crawled_data:
-        relevant_pages = []
-        for page in crawled_data[:3]:  # Use first 3 pages as context
-            relevant_pages.append(f"Хуудас: {page['title']}\nАгуулга: {page['body'][:300]}...")
-        context = "\n\n".join(relevant_pages)
+        # Search for relevant content
+        search_results = search_in_crawled_data(user_message, max_results=3)
+        if search_results:
+            relevant_pages = []
+            for result in search_results:
+                relevant_pages.append(
+                    f"Хуудас: {result['title']}\n"
+                    f"URL: {result['url']}\n"
+                    f"Холбогдох агуулга: {result['snippet']}\n"
+                )
+            context = "\n\n".join(relevant_pages)
     
     # Build system message with context
     system_content = """Та Cloud.mn-ийн баримт бичгийн талаар асуултад хариулдаг Монгол AI туслах юм. 
     Хэрэглэгчтэй монгол хэлээр ярилцаарай. Хариултаа товч бөгөөд ойлгомжтой байлгаарай.
+    
+    Хариулахдаа дараах зүйлсийг анхаарна уу:
+    1. Хариултаа холбогдох баримт бичгийн линкээр дэмжүүлээрэй
+    2. Хэрэв ойлгомжгүй бол тодорхой асууна уу
+    3. Хариултаа бүтэцтэй, цэгцтэй байлгаарай
+    4. Техникийн нэр томъёог монгол хэлээр тайлбарлаарай
     
     Боломжит командууд:
     - crawl: Бүх сайтыг шүүрдэх
@@ -200,7 +213,7 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         response = client.chat.completions.create(
             model="gpt-4.1",
             messages=messages,
-            max_tokens=300,
+            max_tokens=500,  # Increased token limit for better responses
             temperature=0.7
         )
         
@@ -224,28 +237,76 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         return f"🔧 AI-тай холбогдоход саад гарлаа. Та дараах аргуудаар тусламж авч болно:\n• 'help' командыг ашиглана уу\n• 'crawl' эсвэл 'search' командуудыг туршина уу\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
 
 def search_in_crawled_data(query: str, max_results: int = 3):
-    """Search through crawled data"""
+    """Enhanced search through crawled data with better relevance scoring"""
     if not crawled_data:
         return []
     
     query_lower = query.lower()
     results = []
+    scored_pages = []
     
     for page in crawled_data:
-        title_match = query_lower in page['title'].lower()
-        body_match = query_lower in page['body'].lower()
+        score = 0
+        title = page['title'].lower()
+        body = page['body'].lower()
         
-        if title_match or body_match:
-            results.append({
-                'title': page['title'],
-                'url': page['url'],
-                'snippet': page['body'][:200] + "..." if len(page['body']) > 200 else page['body']
-            })
+        # Title matches are more important
+        if query_lower in title:
+            score += 3
+        elif any(word in title for word in query_lower.split()):
+            score += 2
             
-        if len(results) >= max_results:
-            break
+        # Body matches
+        if query_lower in body:
+            score += 2
+        elif any(word in body for word in query_lower.split()):
+            score += 1
+            
+        # Exact phrase matches are very important
+        if f'"{query_lower}"' in body:
+            score += 4
+            
+        if score > 0:
+            scored_pages.append((score, page))
+    
+    # Sort by score and get top results
+    scored_pages.sort(reverse=True)
+    for _, page in scored_pages[:max_results]:
+        # Find the most relevant snippet
+        body = page['body']
+        query_words = query_lower.split()
+        
+        # Try to find a good context around the query
+        best_snippet = ""
+        max_context = 300
+        
+        for word in query_words:
+            if word in body.lower():
+                start = max(0, body.lower().find(word) - 100)
+                end = min(len(body), body.lower().find(word) + 200)
+                snippet = body[start:end]
+                if len(snippet) > len(best_snippet):
+                    best_snippet = snippet
+        
+        if not best_snippet:
+            best_snippet = body[:max_context] + "..." if len(body) > max_context else body
+            
+        results.append({
+            'title': page['title'],
+            'url': page['url'],
+            'snippet': best_snippet,
+            'relevance_score': score
+        })
             
     return results
+
+def scrape_single(url: str):
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    title = soup.title.string.strip() if soup.title else url
+    body, images = extract_content(soup, url)
+    return {"url": url, "title": title, "body": body, "images": images}
 
 
 # —— Enhanced Chatwoot Integration —— #
