@@ -382,24 +382,35 @@ def mark_conversation_resolved(conv_id: int):
 
 
 # —— Teams Integration —— #
-def send_to_teams(message: str, title: str = "Cloud.mn AI Assistant", color: str = "0076D7"):
+def send_to_teams(message: str, title: str = "Cloud.mn AI Assistant", color: str = "0076D7", conv_id: int = None):
     """Send message to Microsoft Teams channel using webhook"""
     if not TEAMS_WEBHOOK_URL:
         logging.warning("Teams webhook URL not configured")
         return False
         
     try:
+        sections = [
+            {
+                "activityTitle": title,
+                "activitySubtitle": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "text": message,
+                "markdown": True
+            }
+        ]
+        
+        # Add Chatwoot URL section if conv_id is provided
+        if conv_id:
+            sections.append({
+                "text": f"<a href='{CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conv_id}'>Chatwoot дээр харах</a>",
+                "markdown": False
+            })
+        
         payload = {
             "@type": "MessageCard",
             "@context": "http://schema.org/extensions",
             "themeColor": color,
             "summary": title,
-            "sections": [{
-                "activityTitle": title,
-                "activitySubtitle": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "text": message,
-                "markdown": True
-            }]
+            "sections": sections
         }
         
         response = requests.post(
@@ -431,64 +442,27 @@ def send_teams_notification(conv_id: int, message: str, message_type: str = "out
         contact_name = contact.get("name", "Хэрэглэгч")
         contact_email = contact.get("email", "Имэйл олдсонгүй")
         
-        # Create Teams message
-        if is_unsolved and confirmed:
-            teams_message = f"""
-### ⚠️ Шийдэгдээгүй асуудал (Зөвшөөрөлтэй)
+        # Create Teams message with simpler format
+        teams_message = f"""
+Cloud.mn AI - {contact_name}
+{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
-**Хэрэглэгч:**
-- Нэр: {contact_name}
-- Имэйл: {contact_email}
-- Харилцан ярианы ID: {conv_id}
+💬 Шинэ мессэж
 
-**Асуудлын дэлгэрэнгүй:**
-{message}
+Хэрэглэгч:
+Нэр: {contact_name}
+Имэйл: {contact_email}
+Харилцан ярианы ID: {conv_id}
 
-**Харилцан ярианы түүх:**
-{get_conversation_history(conv_id)}
-
-[Chatwoot дээр харах]({CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conv_id})
-            """
-            color = "FF0000"  # Red for unsolved issues
-        elif is_unsolved and not confirmed:
-            teams_message = f"""
-### ⚠️ Шийдэгдээгүй асуудал (Зөвшөөрөл хүлээж байна)
-
-**Хэрэглэгч:**
-- Нэр: {contact_name}
-- Имэйл: {contact_email}
-- Харилцан ярианы ID: {conv_id}
-
-**Асуудлын дэлгэрэнгүй:**
-{message}
-
-**Харилцан ярианы түүх:**
-{get_conversation_history(conv_id)}
-
-[Chatwoot дээр харах]({CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conv_id})
-            """
-            color = "FFA500"  # Orange for pending confirmation
-        else:
-            teams_message = f"""
-### 💬 Шинэ мессэж
-
-**Хэрэглэгч:**
-- Нэр: {contact_name}
-- Имэйл: {contact_email}
-- Харилцан ярианы ID: {conv_id}
-
-**Мессэж:**
-{message}
-
-[Chatwoot дээр харах]({CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conv_id})
-            """
-            color = "0076D7" if message_type == "incoming" else "00FF00"
+Алдаа: {message}
+        """
         
-        # Send to Teams
+        # Send to Teams with HTML format
         send_to_teams(
             message=teams_message,
             title=f"Cloud.mn AI - {contact_name}",
-            color=color
+            color="0076D7",  # Default blue color
+            conv_id=conv_id  # Pass conv_id for Chatwoot URL
         )
         
     except Exception as e:
