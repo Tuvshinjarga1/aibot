@@ -152,7 +152,7 @@ def scrape_single(url: str):
 
 # —— AI Assistant Functions —— #
 def get_ai_response(user_message: str, conversation_id: int, context_data: list = None):
-    """Enhanced AI response with better context awareness"""
+    """Enhanced AI response with better context awareness and image support"""
     
     if not client:
         return "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
@@ -168,10 +168,21 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         if search_results:
             relevant_pages = []
             for result in search_results:
+                # Find the page in crawled_data to get images
+                page = next((p for p in crawled_data if p['url'] == result['url']), None)
+                if page and page.get('images'):
+                    image_info = "\nЗургууд:\n" + "\n".join([
+                        f"- {img['alt']}: {img['url']}" if img['alt'] else f"- {img['url']}"
+                        for img in page['images']
+                    ])
+                else:
+                    image_info = ""
+                
                 relevant_pages.append(
                     f"Хуудас: {result['title']}\n"
                     f"URL: {result['url']}\n"
                     f"Холбогдох агуулга: {result['snippet']}\n"
+                    f"{image_info}\n"
                 )
             context = "\n\n".join(relevant_pages)
     
@@ -184,6 +195,12 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     2. Хэрэв ойлгомжгүй бол тодорхой асууна уу
     3. Хариултаа бүтэцтэй, цэгцтэй байлгаарай
     4. Техникийн нэр томъёог монгол хэлээр тайлбарлаарай
+    5. Хэрэв холбогдох зургууд байвал тэдгээрийг хариултад оруулаарай
+    
+    Зургийн мэдээллийг хариултад оруулахдаа:
+    - Зургийн тайлбар (alt text) байвал түүнийг ашиглаарай
+    - Зургийн URL-ийг хариултад оруулаарай
+    - Зургийн талаар товч тайлбар өгөөрэй
     
     Боломжит командууд:
     - crawl: Бүх сайтыг шүүрдэх
@@ -213,7 +230,7 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         response = client.chat.completions.create(
             model="gpt-4.1",
             messages=messages,
-            max_tokens=500,  # Increased token limit for better responses
+            max_tokens=800,  # Increased token limit for better responses with images
             temperature=0.7
         )
         
