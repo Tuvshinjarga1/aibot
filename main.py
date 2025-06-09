@@ -20,6 +20,7 @@ from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.schema import Document
 import tiktoken
+import threading
 
 app = Flask(__name__)
 
@@ -46,7 +47,7 @@ VERIFICATION_URL_BASE = os.environ.get("VERIFICATION_URL_BASE", "http://localhos
 
 # CloudMN documentation тохиргоо
 CLOUDMN_DOCS_BASE = "https://docs.cloud.mn/"
-CRAWL_DELAY = 1  # Секундээр хэлбэрээр серверт ачаалал багасгах
+CRAWL_DELAY = 0.5  # Секундээр хэлбэрээр серверт ачаалал багасгах (1-ээс 0.5 болгох)
 MAX_CRAWL_PAGES = 50  # Максимум хэдэн хуудас авах
 VECTOR_SIMILARITY_THRESHOLD = 0.75  # Vector similarity хязгаар (0-1)
 MAX_VECTOR_RESULTS = 3  # Хамгийн их хэдэн үр дүн буцаах
@@ -189,32 +190,57 @@ def get_cloudmn_docs_content() -> Dict[str, Dict]:
     """CloudMN документацийн контентыг авах (cache-тэй)"""
     global cloudmn_docs_cache, last_crawl_time
     
-    # 1 цагийн дараа дахин crawl хийх
+    # Хэрэв cache байхгүй бол шууд хоосон dict буцаах (background-д crawl хийх)
+    if not cloudmn_docs_cache:
+        print("⚠️ CloudMN docs cache хоосон - background crawling эхлүүлэх...")
+        # Background-д crawling эхлүүлэх (blocking биш)
+        start_background_crawling()
+        return {}  # Хоосон cache буцаах
+    
+    # 4 цагийн дараа background-д дахин crawl хийх
     now = datetime.now()
-    if (last_crawl_time is None or 
-        (now - last_crawl_time).total_seconds() > 3600 or 
-        not cloudmn_docs_cache):
-        
-        print("🔄 CloudMN docs шинэчилж байна...")
-        
-        crawler = CloudMNDocsCrawler()
-        cloudmn_docs_cache = crawler.crawl_docs()
-        last_crawl_time = now
-        
-        print(f"✅ CloudMN docs cache шинэчлэгдлээ ({len(cloudmn_docs_cache)} хуудас)")
+    if (last_crawl_time is not None and 
+        (now - last_crawl_time).total_seconds() > 14400):  # 4 цаг
+        print("🔄 CloudMN docs background refresh...")
+        start_background_crawling()
     
     return cloudmn_docs_cache
+
+def start_background_crawling():
+    """Background thread-д CloudMN crawling эхлүүлэх"""
+    def background_crawl():
+        global cloudmn_docs_cache, last_crawl_time
+        try:
+            print("🚀 Background CloudMN crawling эхэлж байна...")
+            crawler = CloudMNDocsCrawler()
+            # Цөөн хуудас crawl хийх (хурдан болгох)
+            new_cache = crawler.crawl_docs(max_pages=20)  # 50-аас 20 болгох
+            
+            if new_cache:
+                cloudmn_docs_cache = new_cache
+                last_crawl_time = datetime.now()
+                print(f"✅ Background crawling дууслаа ({len(new_cache)} хуудас)")
+            else:
+                print("❌ Background crawling хоосон үр дүн")
+                
+        except Exception as e:
+            print(f"❌ Background crawling алдаа: {e}")
+    
+    # Background thread эхлүүлэх
+    thread = threading.Thread(target=background_crawl, daemon=True)
+    thread.start()
+    print("🔄 Background crawling thread эхлэлээ")
 
 def create_vector_store() -> FAISS:
     """CloudMN документацийг vector store үүсгэх"""
     global vector_store, last_vector_store_update
     
     try:
-        # Хэрэв vector store аль хэдийн үүссэн, 1 цагийн дараа шинэчлэх
+        # Хэрэв vector store аль хэдийн үүссэн, 4 цагийн дараа шинэчлэх
         now = datetime.now()
         if (vector_store is not None and 
             last_vector_store_update is not None and 
-            (now - last_vector_store_update).total_seconds() < 3600):
+            (now - last_vector_store_update).total_seconds() < 14400):  # 4 цаг
             return vector_store
         
         print("🔄 Vector store үүсгэж байна...")
@@ -223,8 +249,8 @@ def create_vector_store() -> FAISS:
         docs_content = get_cloudmn_docs_content()
         
         if not docs_content:
-            print("❌ Документацийн контент хоосон байна")
-            return None
+            print("❌ Документацийн контент хоосон байна (Background crawling явагдаж байна)")
+            return None  # Background-д crawling явагдаж байгаа тул None буцаах
         
         # Документуудыг бэлтгэх
         documents = []
@@ -258,6 +284,10 @@ def create_vector_store() -> FAISS:
                 )
                 documents.append(doc)
         
+        if not documents:
+            print("❌ Документ бэлтгэх боломжгүй")
+            return None
+        
         print(f"✅ {len(documents)} документ бэлтгэлээ")
         
         # Embeddings үүсгэх
@@ -279,14 +309,14 @@ def search_cloudmn_docs_vector(query: str, max_results: int = MAX_VECTOR_RESULTS
     """Vector similarity search ашиглан CloudMN документацаас хайлт хийх"""
     try:
         # Vector store үүсгэх эсвэл авах
-        vector_store = create_vector_store()
+        vector_store_instance = create_vector_store()
         
-        if not vector_store:
-            print("❌ Vector store үүсгэх боломжгүй")
-            return []
+        if not vector_store_instance:
+            print("❌ Vector store үүсгэх боломжгүй (Docs cache хоосон эсвэл crawling явагдаж байна)")
+            return []  # Хоосон list буцаах
         
         # Хайлт хийх
-        docs_and_scores = vector_store.similarity_search_with_score(query, k=max_results)
+        docs_and_scores = vector_store_instance.similarity_search_with_score(query, k=max_results)
         
         results = []
         for doc, score in docs_and_scores:
@@ -313,7 +343,7 @@ def search_cloudmn_docs_vector(query: str, max_results: int = MAX_VECTOR_RESULTS
         
     except Exception as e:
         print(f"❌ Vector search алдаа: {e}")
-        return []
+        return []  # Алдаа гарсан ч хоосон list буцаах
 
 def enhance_ai_response_with_cloudmn_docs(message_content: str) -> str:
     """Хэрэглэгчийн асуултанд CloudMN документацийн мэдээллийг нэмж өгөх (vector search)"""
@@ -324,8 +354,8 @@ def enhance_ai_response_with_cloudmn_docs(message_content: str) -> str:
         search_results = search_cloudmn_docs_vector(message_content)
         
         if not search_results:
-            print("❌ Хайлтад тохирох үр дүн олдсонгүй")
-            return ""
+            print("❌ Хайлтад тохирох үр дүн олдсонгүй (cache хоосон эсвэл холбоотой контент байхгүй)")
+            return ""  # Хоосон string буцаах, алдаа гаргахгүй
         
         print(f"✅ {len(search_results)} үр дүн олдлоо")
         
@@ -344,7 +374,7 @@ def enhance_ai_response_with_cloudmn_docs(message_content: str) -> str:
         
     except Exception as e:
         print(f"❌ CloudMN docs нэмэхэд алдаа: {e}")
-        return ""
+        return ""  # Алдаа гарсан ч хоосон string буцааж, system-ийг зогсоохгүй
 
 def is_valid_email(email):
     """Имэйл хаягийн форматыг шалгах"""
@@ -1230,4 +1260,9 @@ def clean_ai_response(response_text):
         return response_text.strip()
 
 if __name__ == "__main__":
+    # Application эхлэх үед background crawling эхлүүлэх
+    print("🚀 Flask application эхэлж байна...")
+    print("🔄 Анхны CloudMN docs crawling background-д эхлүүлж байна...")
+    start_background_crawling()
+    
     app.run(debug=True, port=5000)
