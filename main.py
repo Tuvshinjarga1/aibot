@@ -2,7 +2,7 @@ import os
 import time
 import logging
 import requests
-import openai
+from openai import OpenAI
 import json
 from urllib.parse import urljoin, urlparse
 from flask import Flask, request, jsonify
@@ -20,7 +20,10 @@ MAX_CRAWL_PAGES      = 50
 CHATWOOT_API_KEY     = os.getenv("CHATWOOT_API_KEY")
 ACCOUNT_ID           = os.getenv("ACCOUNT_ID")
 CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com")
-openai.api_key       = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
+
+# Initialize OpenAI client
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # —— Memory Storage —— #
 conversation_memory = {}
@@ -113,6 +116,9 @@ def scrape_single(url: str):
 def get_ai_response(user_message: str, conversation_id: int, context_data: list = None):
     """Enhanced AI response with context awareness"""
     
+    if not client:
+        return "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
+    
     # Get conversation history
     history = conversation_memory.get(conversation_id, [])
     
@@ -120,8 +126,8 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     context = ""
     if context_data and crawled_data:
         relevant_pages = []
-        for page in crawled_data[:5]:  # Use first 5 pages as context
-            relevant_pages.append(f"Page: {page['title']}\nContent: {page['body'][:500]}...")
+        for page in crawled_data[:3]:  # Use first 3 pages as context
+            relevant_pages.append(f"Хуудас: {page['title']}\nАгуулга: {page['body'][:300]}...")
         context = "\n\n".join(relevant_pages)
     
     # Build conversation context
@@ -137,21 +143,20 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
             - help: Тусламж харуулах
             - search <асуулт>: Мэдээлэл хайх
             
-            Контекст мэдээлэл:
-            {context}
+            {f"Контекст мэдээлэл:\\n{context}" if context else ""}
             """
         }
     ]
     
     # Add conversation history
-    for msg in history[-5:]:  # Last 5 messages
+    for msg in history[-4:]:  # Last 4 messages
         messages.append(msg)
     
     # Add current message
     messages.append({"role": "user", "content": user_message})
     
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=messages,
             max_tokens=300,
@@ -167,15 +172,15 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         conversation_memory[conversation_id].append({"role": "user", "content": user_message})
         conversation_memory[conversation_id].append({"role": "assistant", "content": ai_response})
         
-        # Keep only last 10 messages
-        if len(conversation_memory[conversation_id]) > 10:
-            conversation_memory[conversation_id] = conversation_memory[conversation_id][-10:]
+        # Keep only last 8 messages
+        if len(conversation_memory[conversation_id]) > 8:
+            conversation_memory[conversation_id] = conversation_memory[conversation_id][-8:]
             
         return ai_response
         
     except Exception as e:
-        logging.error(f"OpenAI API error: {e}")
-        return "Уучлаарай, AI-г ашиглахад алдаа гарлaa. Дахин оролдоно уу."
+        logging.error(f"OpenAI API алдаа: {e}")
+        return f"🔧 AI-тай холбогдоход саад гарлаа. Та дараах аргуудаар тусламж авч болно:\n• 'help' командыг ашиглана уу\n• 'crawl' эсвэл 'search' командуудыг туршина уу\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
 
 def search_in_crawled_data(query: str, max_results: int = 3):
     """Search through crawled data"""
