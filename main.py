@@ -708,7 +708,8 @@ def chatwoot_webhook():
                 send_to_chatwoot(conv_id, "✅ Ойлголоо. Таны асуудлыг дэмжлэгийн баг руу илгээхгүй байх болно.")
         else:
             # General AI conversation
-            send_to_chatwoot(conv_id, "🤔 Боловсруулж байна...")
+            send_to_chatwoot(conv_id)
+            # send_to_chatwoot(conv_id, "🤔 Боловсруулж байна...")
             ai_response = get_ai_response(text, conv_id, crawled_data)
             send_to_chatwoot(conv_id, ai_response)
             
