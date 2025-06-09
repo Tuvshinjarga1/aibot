@@ -523,7 +523,7 @@ def chatwoot_webhook():
     text = data.get("content", "").strip()
     contact = data.get("conversation", {}).get("contact", {})
     contact_name = contact.get("name", "Хэрэглэгч")
-    
+
     logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
 
     # Handle different commands
