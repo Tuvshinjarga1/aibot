@@ -549,7 +549,7 @@ def mark_conversation_resolved(conv_id: int):
     
     try:
         resp = requests.post(api_url, json=payload, headers=headers, timeout=10)
-    resp.raise_for_status()
+        resp.raise_for_status()
         return True
     except Exception as e:
         logging.error(f"Failed to mark conversation as resolved: {e}")
