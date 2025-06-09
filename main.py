@@ -9,6 +9,11 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
+# CloudMN documentation crawler болон scraper-ийн dependencies
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
+import json
+from typing import Dict, List, Set
 
 app = Flask(__name__)
 
@@ -33,8 +38,255 @@ MAX_AI_RETRIES = 2  # AI хэдэн удаа оролдсоны дараа аж�
 JWT_SECRET = os.environ.get("JWT_SECRET", "your-secret-key-here")
 VERIFICATION_URL_BASE = os.environ.get("VERIFICATION_URL_BASE", "http://localhost:5000")
 
+# CloudMN documentation тохиргоо
+CLOUDMN_DOCS_BASE = "https://docs.cloud.mn/"
+CRAWL_DELAY = 1  # Секундээр хэлбэрээр серверт ачаалал багасгах
+MAX_CRAWL_PAGES = 50  # Максимум хэдэн хуудас авах
+
 # OpenAI клиент
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+# CloudMN документацийн кэш хадгалах
+cloudmn_docs_cache = {}
+last_crawl_time = None
+
+class CloudMNDocsCrawler:
+    """CloudMN documentation сайтыг crawl хийх класс"""
+    
+    def __init__(self, base_url: str = CLOUDMN_DOCS_BASE):
+        self.base_url = base_url
+        self.visited_urls: Set[str] = set()
+        self.docs_content: Dict[str, Dict] = {}
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'CloudMN-ChatBot-Crawler/1.0 (Educational Purpose)'
+        })
+    
+    def is_valid_docs_url(self, url: str) -> bool:
+        """URL нь CloudMN docs сайтын хэсэг мөн эсэхийг шалгах"""
+        parsed = urlparse(url)
+        return parsed.netloc == 'docs.cloud.mn' and not url.endswith(('.pdf', '.jpg', '.png', '.gif'))
+    
+    def extract_page_content(self, url: str) -> Dict:
+        """Тухайн хуудасны контентыг задлан авах"""
+        try:
+            print(f"🔍 Хуудас задлаж байна: {url}")
+            
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Гарчиг авах
+            title = ""
+            title_tag = soup.find('title')
+            if title_tag:
+                title = title_tag.get_text().strip()
+            
+            # Үндсэн контент авах (docs сайтын хэсгээс)
+            content = ""
+            
+            # Янз бүрийн selector-ууд туршиж үзэх
+            content_selectors = [
+                'main', 'article', '.content', '#content', 
+                '.markdown', '.docs-content', '.main-content'
+            ]
+            
+            for selector in content_selectors:
+                content_elem = soup.select_one(selector)
+                if content_elem:
+                    content = content_elem.get_text(separator='\n', strip=True)
+                    break
+            
+            # Хэрэв тодорхой content олдоогүй бол body дотроос авах
+            if not content:
+                body = soup.find('body')
+                if body:
+                    # Script, style гэх мэт шаардлагагүй элементүүдийг арилгах
+                    for script in body(["script", "style", "nav", "footer", "header"]):
+                        script.decompose()
+                    content = body.get_text(separator='\n', strip=True)
+            
+            # Навигацийн линкүүд олох
+            links = []
+            for link in soup.find_all('a', href=True):
+                href = link['href']
+                absolute_url = urljoin(url, href)
+                if self.is_valid_docs_url(absolute_url):
+                    links.append(absolute_url)
+            
+            return {
+                'url': url,
+                'title': title,
+                'content': content[:5000],  # Хэт урт контентыг хязгаарлах
+                'links': list(set(links)),  # Давхцсан линкүүдийг арилгах
+                'crawled_at': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            print(f"❌ {url} хуудас задлахад алдаа: {e}")
+            return None
+    
+    def crawl_docs(self, max_pages: int = MAX_CRAWL_PAGES) -> Dict[str, Dict]:
+        """CloudMN docs сайтыг crawl хийх"""
+        try:
+            print(f"🚀 CloudMN docs crawling эхэлж байна... (max: {max_pages} хуудас)")
+            
+            # Эхлэх URL-ууд
+            start_urls = [
+                self.base_url,
+                urljoin(self.base_url, '/docs/'),
+                urljoin(self.base_url, '/getting-started/'),
+            ]
+            
+            urls_to_visit = list(start_urls)
+            pages_crawled = 0
+            
+            while urls_to_visit and pages_crawled < max_pages:
+                current_url = urls_to_visit.pop(0)
+                
+                # Аль хэдийн зочилсон URL эсэхийг шалгах
+                if current_url in self.visited_urls:
+                    continue
+                
+                self.visited_urls.add(current_url)
+                
+                # Хуудасны контентыг авах
+                page_data = self.extract_page_content(current_url)
+                
+                if page_data and page_data['content'].strip():
+                    self.docs_content[current_url] = page_data
+                    pages_crawled += 1
+                    
+                    print(f"✅ [{pages_crawled}/{max_pages}] {current_url}")
+                    
+                    # Шинэ линкүүдийг нэмэх
+                    for link in page_data.get('links', []):
+                        if link not in self.visited_urls and link not in urls_to_visit:
+                            urls_to_visit.append(link)
+                
+                # Сервертэй зөрүүлэхгүйн тулд түр зогсох
+                time.sleep(CRAWL_DELAY)
+            
+            print(f"🎉 Crawling дууслаа! Нийт {len(self.docs_content)} хуудас цуглуулав")
+            return self.docs_content
+            
+        except Exception as e:
+            print(f"❌ Crawling алдаа: {e}")
+            return {}
+
+def get_cloudmn_docs_content() -> Dict[str, Dict]:
+    """CloudMN документацийн контентыг авах (cache-тэй)"""
+    global cloudmn_docs_cache, last_crawl_time
+    
+    # 1 цагийн дараа дахин crawl хийх
+    now = datetime.now()
+    if (last_crawl_time is None or 
+        (now - last_crawl_time).total_seconds() > 3600 or 
+        not cloudmn_docs_cache):
+        
+        print("🔄 CloudMN docs шинэчилж байна...")
+        
+        crawler = CloudMNDocsCrawler()
+        cloudmn_docs_cache = crawler.crawl_docs()
+        last_crawl_time = now
+        
+        print(f"✅ CloudMN docs cache шинэчлэгдлээ ({len(cloudmn_docs_cache)} хуудас)")
+    
+    return cloudmn_docs_cache
+
+def search_cloudmn_docs(query: str, max_results: int = 3) -> List[Dict]:
+    """CloudMN документацаас хайлт хийх"""
+    try:
+        docs_content = get_cloudmn_docs_content()
+        
+        if not docs_content:
+            return []
+        
+        query_lower = query.lower()
+        results = []
+        
+        for url, page_data in docs_content.items():
+            title = page_data.get('title', '')
+            content = page_data.get('content', '')
+            
+            # Оноо тооцох (title дэх тохиролцоо илүү чухал)
+            score = 0
+            if query_lower in title.lower():
+                score += 10
+            if query_lower in content.lower():
+                score += content.lower().count(query_lower)
+            
+            if score > 0:
+                # Хайлтын үр дүнд тохирох хэсгийг авах
+                content_excerpt = content[:500]
+                if query_lower in content.lower():
+                    # Query орсон хэсгийг олж, түүний эргэн тойронд контекст авах
+                    start_idx = content.lower().find(query_lower)
+                    start_context = max(0, start_idx - 200)
+                    end_context = min(len(content), start_idx + 300)
+                    content_excerpt = content[start_context:end_context]
+                    if start_context > 0:
+                        content_excerpt = "..." + content_excerpt
+                    if end_context < len(content):
+                        content_excerpt = content_excerpt + "..."
+                
+                results.append({
+                    'url': url,
+                    'title': title,
+                    'content_excerpt': content_excerpt,
+                    'score': score
+                })
+        
+        # Оноогоор эрэмбэлэж, хамгийн сайн үр дүнгүүдийг буцаах
+        results.sort(key=lambda x: x['score'], reverse=True)
+        return results[:max_results]
+        
+    except Exception as e:
+        print(f"❌ CloudMN docs хайлтад алдаа: {e}")
+        return []
+
+def enhance_ai_response_with_cloudmn_docs(message_content: str) -> str:
+    """Хэрэглэгчийн асуултанд CloudMN документацийн мэдээллийг нэмж өгөх"""
+    try:
+        # CloudMN-тай холбоотой түлхүүр үгүүд
+        cloudmn_keywords = [
+            'cloudmn', 'cloud.mn', 'сервер', 'instance', 'виртуал', 
+            'volume', 'диск', 'snapshot', 'security group', 'портын тохиргоо',
+            'floating ip', 'сүлжээ', 'load balancer', 'тэнцвэржүүлэгч',
+            'kubernetes', 'object storage', 'app platform', 'simplehost', 'instance holboh'
+        ]
+        
+        # Хэрэв асуулт CloudMN-тай холбоотой бол хайлт хийх
+        message_lower = message_content.lower()
+        is_cloudmn_related = any(keyword in message_lower for keyword in cloudmn_keywords)
+        
+        if not is_cloudmn_related:
+            return ""  # CloudMN-тай холбоогүй асуулт
+        
+        print(f"🔍 CloudMN холбоотой асуулт илэрлээ: {message_content[:50]}...")
+        
+        # Документацаас хайлт хийх
+        search_results = search_cloudmn_docs(message_content)
+        
+        if not search_results:
+            return ""
+        
+        # AI-д өгөх нэмэлт контекст бэлтгэх
+        docs_context = "\n\nCloudMN документацаас олдсон холбогдох мэдээлэл:\n"
+        
+        for i, result in enumerate(search_results, 1):
+            docs_context += f"\n{i}. {result['title']}\n"
+            docs_context += f"   URL: {result['url']}\n"
+            docs_context += f"   Контент: {result['content_excerpt']}\n"
+        
+        docs_context += "\nЭнэ мэдээллийг ашиглаж хэрэглэгчийн асуултанд хариулна уу."
+        
+        return docs_context
+        
+    except Exception as e:
+        print(f"❌ CloudMN docs нэмэхэд алдаа: {e}")
+        return ""
 
 def is_valid_email(email):
     """Имэйл хаягийн форматыг шалгах"""
@@ -373,13 +625,22 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
         return False
 
 def get_ai_response(thread_id, message_content, conv_id=None, customer_email=None, retry_count=0):
-    """OpenAI Assistant-ээс хариулт авах"""
+    """OpenAI Assistant-ээс хариулт авах (CloudMN docs integration-тэй)"""
     try:
+        # CloudMN документацийн нэмэлт мэдээлэл авах
+        cloudmn_context = enhance_ai_response_with_cloudmn_docs(message_content)
+        
+        # Хэрэв CloudMN холбоотой мэдээлэл олдвол үүнийг мессежид нэмэх
+        enhanced_message = message_content
+        if cloudmn_context:
+            enhanced_message = message_content + cloudmn_context
+            print(f"📚 CloudMN docs контекст нэмэгдлээ ({len(cloudmn_context)} тэмдэгт)")
+
         # Хэрэглэгчийн мессежийг thread руу нэмэх
         client.beta.threads.messages.create(
             thread_id=thread_id,
             role="user",
-            content=message_content
+            content=enhanced_message
         )
 
         # Assistant run үүсгэх
@@ -432,7 +693,7 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
             
             return timeout_msg
 
-        # Assistant-ийн хариультыг авах
+        # Assistant-ийн хариултыг авах
         messages = client.beta.threads.messages.list(thread_id=thread_id)
         
         for msg in messages.data:
@@ -909,6 +1170,72 @@ def clean_ai_response(response_text):
     except Exception as e:
         print(f"❌ AI хариулт цэвэрлэхэд алдаа: {e}")
         return response_text.strip()
+
+@app.route("/test-cloudmn-crawler", methods=["GET"])
+def test_cloudmn_crawler():
+    """CloudMN docs crawler тест хийх"""
+    try:
+        print("🧪 CloudMN crawler тест эхэлж байна...")
+        
+        # Crawler үүсгэх
+        crawler = CloudMNDocsCrawler()
+        
+        # Зөвхөн 5 хуудас тест хийх
+        docs_content = crawler.crawl_docs(max_pages=5)
+        
+        # Үр дүнг буцаах
+        result = {
+            "status": "success",
+            "pages_crawled": len(docs_content),
+            "pages": []
+        }
+        
+        for url, page_data in docs_content.items():
+            result["pages"].append({
+                "url": url,
+                "title": page_data.get("title", "")[:100],
+                "content_length": len(page_data.get("content", "")),
+                "links_found": len(page_data.get("links", []))
+            })
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        return jsonify({"error": f"Crawler тест алдаа: {str(e)}"}), 500
+
+@app.route("/test-cloudmn-search", methods=["GET"])
+def test_cloudmn_search():
+    """CloudMN docs хайлт тест хийх"""
+    try:
+        query = request.args.get('q', 'сервер')
+        print(f"🔍 CloudMN хайлт тест: '{query}'")
+        
+        # Хайлт хийх
+        search_results = search_cloudmn_docs(query, max_results=5)
+        
+        result = {
+            "status": "success",
+            "query": query,
+            "results_count": len(search_results),
+            "results": search_results
+        }
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        return jsonify({"error": f"Хайлт тест алдаа: {str(e)}"}), 500
+
+@app.route("/cloudmn-docs-status", methods=["GET"])
+def cloudmn_docs_status():
+    """CloudMN документацийн кэшийн статус"""
+    global cloudmn_docs_cache, last_crawl_time
+    
+    return jsonify({
+        "cache_status": "loaded" if cloudmn_docs_cache else "empty",
+        "pages_cached": len(cloudmn_docs_cache),
+        "last_crawl_time": last_crawl_time.isoformat() if last_crawl_time else None,
+        "cache_age_hours": (datetime.now() - last_crawl_time).total_seconds() / 3600 if last_crawl_time else None
+    }), 200
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)

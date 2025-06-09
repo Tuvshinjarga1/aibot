@@ -11,3 +11,7 @@ langchain-community
 faiss-cpu
 tiktoken
 gunicorn
+# CloudMN documentation crawler болон scraper-ийн нэмэлт packages
+urllib3
+html5lib
+soupsieve
