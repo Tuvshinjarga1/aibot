@@ -329,9 +329,9 @@ def scrape_single(url: str):
 
 # —— AI Analysis Functions —— #
 def analyze_user_message_with_ai(user_message: str, ai_response: str, conv_id: int):
-    """Use AI to analyze if user needs support team or matches services"""
+    """Use AI to analyze if user needs support team and identify the actual problem"""
     if not client:
-        return {"needs_support": False, "matching_services": [], "confidence": 0}
+        return {"needs_support": False, "problem_description": "", "confidence": 0}
     
     try:
         # Create service list for AI analysis
@@ -341,7 +341,8 @@ def analyze_user_message_with_ai(user_message: str, ai_response: str, conv_id: i
 Хэрэглэгчийн асуулт болон AI хариултыг дүгнэж, дараах асуултуудад хариулна уу:
 
 1. Хэрэглэгч дэмжлэгийн багтай холбогдох шаардлагатай юу? (техникийн асуудал, төвөгтэй асуудал, AI хариулт хангалтгүй)
-2. Хэрэглэгчийн асуулт дараах үйлчилгээнүүдтэй тохирч байна уу?
+2. Хэрэглэгчийн тулгарч байгаа асуудлыг товчхон тодорхойлно уу
+3. Хэрэглэгчийн асуулт дараах үйлчилгээнүүдтэй тохирч байна уу?
 
 Үйлчилгээний жагсаалт:
 {service_list}
@@ -353,7 +354,7 @@ AI хариулт: {ai_response}
 {{
     "needs_support": true/false,
     "confidence": 0-100,
-    "reason": "яагаад дэмжлэг хэрэгтэй болох шалтгаан",
+    "problem_description": "хэрэглэгчийн тулгарч байгаа асуудлын товч тайлбар",
     "matching_services": ["тохирох үйлчилгээний нэр1", "тохирох үйлчилгээний нэр2"],
     "suggested_action": "санал болгох үйлдэл"
 }}
@@ -364,7 +365,7 @@ AI хариулт: {ai_response}
             messages=[
                 {
                     "role": "system", 
-                    "content": "Та мэргэжлийн дүгнэлт хийгч. Хэрэглэгчийн хэрэгцээг тодорхойлж, зөв шийдэл санал болгож чаддаг."
+                    "content": "Та мэргэжлийн дүгнэлт хийгч. Хэрэглэгчийн хэрэгцээг тодорхойлж, асуудлыг товч тодорхой тайлбарлаж чаддаг."
                 },
                 {
                     "role": "user", 
@@ -386,16 +387,21 @@ AI хариулт: {ai_response}
         else:
             # Fallback analysis
             return {
-                "needs_support": any(keyword in user_message.lower() for keyword in ["алдаа", "ажилахгүй", "асуудал", "тусламж"]),
+                "needs_support": "алдаа" in user_message.lower() or "асуудал" in user_message.lower() or "ажилахгүй" in user_message.lower(),
+                "problem_description": user_message[:100] + "..." if len(user_message) > 100 else user_message,
                 "matching_services": [],
                 "confidence": 50,
-                "reason": "JSON parse хийх боломжгүй",
                 "suggested_action": "Manual review шаардлагатай"
             }
             
     except Exception as e:
         logging.error(f"AI analysis алдаа: {e}")
-        return {"needs_support": False, "matching_services": [], "confidence": 0}
+        return {
+            "needs_support": False, 
+            "problem_description": user_message[:100] + "..." if len(user_message) > 100 else user_message,
+            "matching_services": [], 
+            "confidence": 0
+        }
 
 def suggest_services_from_analysis(matching_services: list):
     """Generate service suggestions based on analysis"""
@@ -517,7 +523,7 @@ def send_to_teams(message: str, title: str = "Cloud.mn AI Assistant", color: str
         logging.error(f"Failed to send message to Teams: {e}")
         return False
 
-def send_teams_notification(conv_id: int, message: str, message_type: str = "outgoing", is_unsolved: bool = False, confirmed: bool = False, user_email: str = None):
+def send_teams_notification(conv_id: int, message: str, message_type: str = "outgoing", is_unsolved: bool = False, confirmed: bool = False, user_email: str = None, original_question: str = ""):
     """Send notification to Teams about new conversation or message"""
     if not TEAMS_WEBHOOK_URL:
         return
@@ -537,6 +543,33 @@ def send_teams_notification(conv_id: int, message: str, message_type: str = "out
             # Get email from conversation or use contact email as fallback
             display_email = user_email if user_email else contact_email
             
+            # Use AI to analyze and describe the problem for support team
+            problem_description = ""
+            if original_question:
+                try:
+                    # Analyze the original question to get a clear problem description
+                    problem_analysis = client.chat.completions.create(
+                        model="gpt-4",
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "Та хэрэглэгчийн асуудлыг товч, тодорхой тайлбарлаж өгөх мэргэжилтэн. Дэмжлэгийн багт ойлгомжтой байх ёстой."
+                            },
+                            {
+                                "role": "user",
+                                "content": f"Хэрэглэгчийн асуулт: '{original_question}'\n\nЭнэ асуудлыг дэмжлэгийн багт товч, тодорхой тайлбарлаж өгнө үү (1-2 өгүүлбэрээр):"
+                            }
+                        ],
+                        max_tokens=150,
+                        temperature=0.3
+                    )
+                    problem_description = problem_analysis.choices[0].message.content.strip()
+                except Exception as e:
+                    logging.error(f"Problem analysis failed: {e}")
+                    problem_description = original_question
+            else:
+                problem_description = message
+            
             # Create Teams message with simpler format
             teams_message = f"""
 Cloud.mn AI - {contact_name}
@@ -549,7 +582,7 @@ Cloud.mn AI - {contact_name}
 Имэйл: {display_email}
 Харилцан ярианы ID: {conv_id}
 
-Алдаа: {message}
+Асуудал: {problem_description}
             """
             
             # Send to Teams with HTML format
@@ -811,7 +844,8 @@ def chatwoot_webhook():
                     "outgoing",
                     is_unsolved=True,
                     confirmed=True,
-                    user_email=user_email
+                    user_email=user_email,
+                    original_question=original_question
                 )
                 
                 send_to_chatwoot(conv_id, f"✅ Баярлалаа! Таны асуудлыг ({user_email}) дэмжлэгийн баг руу илгээлээ. Тун удахгүй холбогдох болно.")
@@ -846,7 +880,7 @@ def chatwoot_webhook():
                 confirmation_message = f"""
 ❓ Таны асуудлыг шийдвэрлэхэд мэргэжлийн дэмжлэг шаардлагатай байх магадлалтай. Дэмжлэгийн баг руу илгээх үү?
 
-🔍 **Дүгнэлт:** {analysis.get('reason', 'Техникийн дэмжлэг шаардлагатай')}
+🔍 **Дүгнэлт:** {analysis.get('problem_description', 'Техникийн асуудлын товч тайлбар')}
 📊 **Итгэлийн түвшин:** {confidence}%
 
 Зөвшөөрч байвал "тийм" эсвэл "зөвшөөрч байна" гэж бичнэ үү.
@@ -1020,18 +1054,11 @@ SERVICE_KEYWORDS = [
     "серверийн алдаа", "system error", "debugging", "troubleshooting"
 ]
 
-# 2. Дэмжлэг хүссэн түлхүүр үгс
-SUPPORT_KEYWORDS = [
-    "дэмжлэг", "support", "тусламж", "зөвлөгөө", "холбогдох", "operator", "help", "админ",
-    "алдаа", "асуудал", "problem", "issue", "bug", "ажилахгүй", "broken"
-]
-
 def contains_service_or_support(text):
     """Enhanced service and support detection"""
     text_lower = text.lower()
     found_service = any(service.lower() in text_lower for service in SERVICE_KEYWORDS)
-    found_support = any(word in text_lower for word in SUPPORT_KEYWORDS)
-    return found_service or found_support
+    return found_service
 
 def get_services_in_text(text):
     """Enhanced service detection in text"""
