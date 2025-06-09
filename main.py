@@ -22,6 +22,7 @@ ACCOUNT_ID           = os.getenv("ACCOUNT_ID")
 CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com")
 OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
 AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true"
+TEAMS_WEBHOOK_URL    = os.getenv("TEAMS_WEBHOOK_URL")  # Microsoft Teams webhook URL
 
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -380,6 +381,137 @@ def mark_conversation_resolved(conv_id: int):
         return False
 
 
+# —— Teams Integration —— #
+def send_to_teams(message: str, title: str = "Cloud.mn AI Assistant", color: str = "0076D7"):
+    """Send message to Microsoft Teams channel using webhook"""
+    if not TEAMS_WEBHOOK_URL:
+        logging.warning("Teams webhook URL not configured")
+        return False
+        
+    try:
+        payload = {
+            "@type": "MessageCard",
+            "@context": "http://schema.org/extensions",
+            "themeColor": color,
+            "summary": title,
+            "sections": [{
+                "activityTitle": title,
+                "activitySubtitle": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "text": message,
+                "markdown": True
+            }]
+        }
+        
+        response = requests.post(
+            TEAMS_WEBHOOK_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        response.raise_for_status()
+        logging.info("Message sent to Teams successfully")
+        return True
+        
+    except Exception as e:
+        logging.error(f"Failed to send message to Teams: {e}")
+        return False
+
+def send_teams_notification(conv_id: int, message: str, message_type: str = "outgoing", is_unsolved: bool = False, confirmed: bool = False):
+    """Send notification to Teams about new conversation or message"""
+    if not TEAMS_WEBHOOK_URL:
+        return
+        
+    try:
+        # Get conversation info
+        conv_info = get_conversation_info(conv_id)
+        if not conv_info:
+            return
+            
+        contact = conv_info.get("contact", {})
+        contact_name = contact.get("name", "Хэрэглэгч")
+        contact_email = contact.get("email", "Имэйл олдсонгүй")
+        
+        # Create Teams message
+        if is_unsolved and confirmed:
+            teams_message = f"""
+### ⚠️ Шийдэгдээгүй асуудал (Зөвшөөрөлтэй)
+
+**Хэрэглэгч:**
+- Нэр: {contact_name}
+- Имэйл: {contact_email}
+- Харилцан ярианы ID: {conv_id}
+
+**Асуудлын дэлгэрэнгүй:**
+{message}
+
+**Харилцан ярианы түүх:**
+{get_conversation_history(conv_id)}
+
+[Chatwoot дээр харах]({CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conv_id})
+            """
+            color = "FF0000"  # Red for unsolved issues
+        elif is_unsolved and not confirmed:
+            teams_message = f"""
+### ⚠️ Шийдэгдээгүй асуудал (Зөвшөөрөл хүлээж байна)
+
+**Хэрэглэгч:**
+- Нэр: {contact_name}
+- Имэйл: {contact_email}
+- Харилцан ярианы ID: {conv_id}
+
+**Асуудлын дэлгэрэнгүй:**
+{message}
+
+**Харилцан ярианы түүх:**
+{get_conversation_history(conv_id)}
+
+[Chatwoot дээр харах]({CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conv_id})
+            """
+            color = "FFA500"  # Orange for pending confirmation
+        else:
+            teams_message = f"""
+### 💬 Шинэ мессэж
+
+**Хэрэглэгч:**
+- Нэр: {contact_name}
+- Имэйл: {contact_email}
+- Харилцан ярианы ID: {conv_id}
+
+**Мессэж:**
+{message}
+
+[Chatwoot дээр харах]({CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conv_id})
+            """
+            color = "0076D7" if message_type == "incoming" else "00FF00"
+        
+        # Send to Teams
+        send_to_teams(
+            message=teams_message,
+            title=f"Cloud.mn AI - {contact_name}",
+            color=color
+        )
+        
+    except Exception as e:
+        logging.error(f"Failed to send Teams notification: {e}")
+
+def get_conversation_history(conv_id: int, max_messages: int = 5):
+    """Get recent conversation history"""
+    try:
+        memory = conversation_memory.get(conv_id, [])
+        if not memory:
+            return "Харилцан ярианы түүх олдсонгүй"
+            
+        history = []
+        for msg in memory[-max_messages:]:
+            role = "👤 Хэрэглэгч" if msg["role"] == "user" else "🤖 AI"
+            history.append(f"{role}: {msg['content']}")
+            
+        return "\n\n".join(history)
+    except Exception as e:
+        logging.error(f"Failed to get conversation history: {e}")
+        return "Харилцан ярианы түүхийг ачаалахад алдаа гарлаа"
+
+
 # —— API Endpoints —— #
 @app.route("/api/scrape", methods=["POST"])
 def api_scrape():
@@ -402,8 +534,8 @@ def api_crawl():
 # —— Enhanced Chatwoot Webhook —— #
 @app.route("/webhook/chatwoot", methods=["POST"])
 def chatwoot_webhook():
-    """Enhanced webhook with better AI integration"""
-    global crawled_data, crawl_status  # Move global declaration to the top
+    """Enhanced webhook with better AI integration and Teams notifications"""
+    global crawled_data, crawl_status
     
     data = request.json or {}
     
@@ -418,15 +550,16 @@ def chatwoot_webhook():
     
     logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
     
+    # Send notification to Teams
+    send_teams_notification(conv_id, text, "incoming")
+    
     # Handle different commands
     if text.lower() == "crawl":
         # Check if auto-crawl already completed
         if crawl_status["status"] == "completed":
-            send_to_chatwoot(conv_id, 
-                f"✅ Сайт аль хэдийн шүүрдэгдсэн байна! "
-                f"{crawl_status.get('pages_count', 0)} хуудас бэлэн.\n\n"
-                f"'search <асуулт>' командаар хайлт хийж болно!"
-            )
+            response = f"✅ Сайт аль хэдийн шүүрдэгдсэн байна! {crawl_status.get('pages_count', 0)} хуудас бэлэн.\n\n'search <асуулт>' командаар хайлт хийж болно!"
+            send_to_chatwoot(conv_id, response)
+            send_teams_notification(conv_id, f"Сайт шүүрдэгдсэн байна. {crawl_status.get('pages_count', 0)} хуудас бэлэн.", "outgoing")
         elif crawl_status["status"] == "running":
             send_to_chatwoot(conv_id, "🔄 Сайт одоо шүүрдэгдэж байна. Түр хүлээнэ үү...")
         else:
@@ -438,6 +571,7 @@ def chatwoot_webhook():
             if not crawled_data:
                 crawl_status = {"status": "failed", "message": "Manual crawl failed"}
                 send_to_chatwoot(conv_id, "❌ Шүүрдэх явцад алдаа гарлаа. Дахин оролдоно уу.")
+                send_teams_notification(conv_id, "❌ Сайт шүүрдэхэд алдаа гарлаа", "outgoing")
             else:
                 crawl_status = {
                     "status": "completed", 
@@ -446,11 +580,9 @@ def chatwoot_webhook():
                     "timestamp": datetime.now().isoformat()
                 }
                 lines = [f"📄 {p['title']} — {p['url']}" for p in crawled_data[:3]]
-                send_to_chatwoot(conv_id,
-                    f"✅ {len(crawled_data)} хуудас амжилттай шүүрдлээ!\n\n"
-                    f"Эхний 3 хуудас:\n" + "\n".join(lines) + 
-                    f"\n\nОдоо 'search <асуулт>' командаар хайлт хийж болно!"
-                )
+                response = f"✅ {len(crawled_data)} хуудас амжилттай шүүрдлээ!\n\nЭхний 3 хуудас:\n" + "\n".join(lines) + f"\n\nОдоо 'search <асуулт>' командаар хайлт хийж болно!"
+                send_to_chatwoot(conv_id, response)
+                send_teams_notification(conv_id, f"✅ {len(crawled_data)} хуудас амжилттай шүүрдлээ!", "outgoing")
 
     elif text.lower().startswith("scrape"):
         parts = text.split(maxsplit=1)
@@ -464,13 +596,13 @@ def chatwoot_webhook():
                 page = scrape_single(url)
                 summary = get_ai_response(f"Энэ агуулгыг товчлон хэлээрэй: {page['body'][:1500]}", conv_id)
                 
-                send_to_chatwoot(conv_id,
-                    f"📄 **{page['title']}**\n\n"
-                    f"📝 **Товчилсон агуулга:**\n{summary}\n\n"
-                    f"🔗 {url}"
-                )
+                response = f"📄 **{page['title']}**\n\n📝 **Товчилсон агуулга:**\n{summary}\n\n🔗 {url}"
+                send_to_chatwoot(conv_id, response)
+                send_teams_notification(conv_id, f"📄 {page['title']} хуудсыг шүүрдлээ", "outgoing")
             except Exception as e:
-                send_to_chatwoot(conv_id, f"❌ {url} хаягыг шүүрдэхэд алдаа гарлаа: {e}")
+                error_msg = f"❌ {url} хаягыг шүүрдэхэд алдаа гарлаа: {e}"
+                send_to_chatwoot(conv_id, error_msg)
+                send_teams_notification(conv_id, error_msg, "outgoing")
 
     elif text.lower().startswith("search"):
         parts = text.split(maxsplit=1)
@@ -483,9 +615,7 @@ def chatwoot_webhook():
             if crawl_status["status"] == "running":
                 send_to_chatwoot(conv_id, "🔄 Сайт шүүрдэгдэж байна. Түр хүлээгээд дахин оролдоно уу.")
             elif crawl_status["status"] in ["not_started", "failed", "error"] or not crawled_data:
-                send_to_chatwoot(conv_id, 
-                    "📚 Мэдээлэл бэлэн байхгүй байна. 'crawl' командыг ашиглан сайтыг шүүрдүүлнэ үү."
-                )
+                send_to_chatwoot(conv_id, "📚 Мэдээлэл бэлэн байхгүй байна. 'crawl' командыг ашиглан сайтыг шүүрдүүлнэ үү.")
             else:
                 send_to_chatwoot(conv_id, f"🔍 '{query}' хайж байна...")
                 
@@ -498,8 +628,11 @@ def chatwoot_webhook():
                         response += f"   🔗 {result['url']}\n\n"
                     
                     send_to_chatwoot(conv_id, response)
+                    send_teams_notification(conv_id, f"🔍 '{query}' хайлтын үр дүн: {len(results)} илэрц олдлоо", "outgoing")
                 else:
-                    send_to_chatwoot(conv_id, f"❌ '{query}' хайлтаар илэрц олдсонгүй.")
+                    response = f"❌ '{query}' хайлтаар илэрц олдсонгүй."
+                    send_to_chatwoot(conv_id, response)
+                    send_teams_notification(conv_id, response, "outgoing")
 
     elif text.lower() in ["help", "тусламж"]:
         # Show status-aware help
@@ -529,16 +662,89 @@ def chatwoot_webhook():
 ⏰ Үргэлж тусламжид бэлэн байна!
         """
         send_to_chatwoot(conv_id, help_text)
+        send_teams_notification(conv_id, f"ℹ️ {contact_name} тусламж хүссэн", "outgoing")
 
     elif text.lower() in ["баяртай", "goodbye", "баай"]:
-        send_to_chatwoot(conv_id, f"👋 Баяртай {contact_name}! Дараа уулзацгаая!")
+        response = f"👋 Баяртай {contact_name}! Дараа уулзацгаая!"
+        send_to_chatwoot(conv_id, response)
+        send_teams_notification(conv_id, response, "outgoing")
         mark_conversation_resolved(conv_id)
 
     else:
-        # General AI conversation
-        send_to_chatwoot(conv_id, "🤔 Боловсруулж байна...")
-        ai_response = get_ai_response(text, conv_id, crawled_data)
-        send_to_chatwoot(conv_id, ai_response)
+        # Check if this is a response to a confirmation request
+        memory = conversation_memory.get(conv_id, [])
+        if memory and "pending_confirmation" in memory[-1].get("content", ""):
+            # Use GPT to understand the response
+            confirmation_response = client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """Та хэрэглэгчийн хариултыг дүгнэж, зөвшөөрөл эсвэл татгалзлыг тодорхойлох ёстой.
+                        Хариултад 'yes' эсвэл 'no' гэж бичнэ үү."""
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Хэрэглэгчийн хариулт: {text}\n\nЭнэ нь зөвшөөрөл мөн үү, эсвэл татгалзвал мөн үү?"
+                    }
+                ],
+                max_tokens=10,
+                temperature=0.3
+            )
+            
+            is_confirmed = confirmation_response.choices[0].message.content.strip().lower() == "yes"
+            
+            if is_confirmed:
+                # Send to Teams with confirmation
+                send_teams_notification(
+                    conv_id,
+                    f"AI хариулт: {memory[-2]['content']}\n\nХэрэглэгчийн асуулт: {memory[-3]['content']}",
+                    "outgoing",
+                    is_unsolved=True,
+                    confirmed=True
+                )
+                send_to_chatwoot(conv_id, "✅ Баярлалаа! Таны асуудлыг дэмжлэгийн баг руу илгээлээ. Тун удахгүй холбогдох болно.")
+            else:
+                send_to_chatwoot(conv_id, "✅ Ойлголоо. Таны асуудлыг дэмжлэгийн баг руу илгээхгүй байх болно.")
+        else:
+            # General AI conversation
+            send_to_chatwoot(conv_id, "🤔 Боловсруулж байна...")
+            ai_response = get_ai_response(text, conv_id, crawled_data)
+            send_to_chatwoot(conv_id, ai_response)
+            
+            # Check if AI couldn't help
+            if any(keyword in ai_response.lower() for keyword in ["ойлгомжгүй", "тодорхойгүй", "алдаа", "саад"]):
+                # Ask for confirmation before sending to Teams
+                confirmation_message = f"""
+❓ Таны асуудлыг шийдвэрлэхэд хүндрэлтэй байна. Дэмжлэгийн баг руу илгээх үү?
+
+Асуулт: {text}
+AI хариулт: {ai_response}
+
+Зөвшөөрч байвал "тийм" эсвэл "зөвшөөрч байна" гэж бичнэ үү.
+Зөвшөөрөхгүй бол "үгүй" эсвэл "зөвшөөрөхгүй" гэж бичнэ үү.
+                """
+                send_to_chatwoot(conv_id, confirmation_message)
+                
+                # Store the conversation with pending confirmation
+                if conv_id not in conversation_memory:
+                    conversation_memory[conv_id] = []
+                conversation_memory[conv_id].append({"role": "assistant", "content": confirmation_message + " pending_confirmation"})
+                
+                # Send to Teams as pending confirmation
+                send_teams_notification(
+                    conv_id,
+                    f"AI хариулт: {ai_response}\n\nХэрэглэгчийн асуулт: {text}",
+                    "outgoing",
+                    is_unsolved=True,
+                    confirmed=False
+                )
+            else:
+                send_teams_notification(
+                    conv_id,
+                    f"💬 {contact_name}-ийн асуулт: {text}\n\n🤖 AI хариулт: {ai_response}",
+                    "outgoing"
+                )
 
     return jsonify({"status": "success"}), 200
 
