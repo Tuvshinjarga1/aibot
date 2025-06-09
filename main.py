@@ -221,9 +221,7 @@ def start_background_crawling():
                 last_crawl_time = datetime.now()
                 print(f"✅ Background crawling дууслаа ({len(new_cache)} хуудас)")
                 
-                # Crawling дууссаны дараа шууд vector store үүсгэх
-                print("🔄 Vector store background-д үүсгэж байна...")
-                start_background_vector_store_creation()
+                # NOTE: Vector store-ийг initialize_system()-д үүсгэдэг тул энд дахин үүсгэхгүй
                 
             else:
                 print("❌ Background crawling хоосон үр дүн")
@@ -236,44 +234,14 @@ def start_background_crawling():
     thread.start()
     print("🔄 Background crawling thread эхлэлээ")
 
-def start_background_vector_store_creation():
-    """Background thread-д vector store үүсгэх"""
-    def background_vector_creation():
-        global vector_store, last_vector_store_update
-        try:
-            print("🤖 Background vector store үүсгэж байна...")
-            
-            # Хэрэв аль хэдийн байгаа бол алгасах
-            if vector_store is not None:
-                print("✅ Vector store аль хэдийн үүссэн байна")
-                return
-            
-            # Vector store үүсгэх
-            new_vector_store = create_vector_store()
-            
-            if new_vector_store:
-                print("✅ Background vector store амжилттай үүсгэлээ")
-            else:
-                print("❌ Background vector store үүсгэхэд алдаа")
-                
-        except Exception as e:
-            print(f"❌ Background vector store алдаа: {e}")
-    
-    # Background thread эхлүүлэх
-    thread = threading.Thread(target=background_vector_creation, daemon=True)
-    thread.start()
-    print("🔄 Background vector store thread эхлэлээ")
-
 def create_vector_store() -> FAISS:
     """CloudMN документацийг vector store үүсгэх"""
     global vector_store, last_vector_store_update
     
     try:
-        # Хэрэв vector store аль хэдийн үүссэн, 4 цагийн дараа шинэчлэх
-        now = datetime.now()
-        if (vector_store is not None and 
-            last_vector_store_update is not None and 
-            (now - last_vector_store_update).total_seconds() < 14400):  # 4 цаг
+        # Only-once guard: Хэрэв аль хэдийн үүссэн бол буцаах
+        if vector_store is not None:
+            print("✅ Vector store аль хэдийн үүссэн байна")
             return vector_store
         
         print("🔄 Vector store үүсгэж байна...")
@@ -326,9 +294,9 @@ def create_vector_store() -> FAISS:
         # Embeddings үүсгэх
         embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
         
-        # Vector store үүсгэх
+        # Vector store үүсгэх ба global variable-д хадгалах
         vector_store = FAISS.from_documents(documents, embeddings)
-        last_vector_store_update = now
+        last_vector_store_update = datetime.now()
         
         print(f"✅ Vector store үүсгэлээ ({len(documents)} документ)")
         
@@ -340,16 +308,16 @@ def create_vector_store() -> FAISS:
 
 def search_cloudmn_docs_vector(query: str, max_results: int = MAX_VECTOR_RESULTS) -> List[Dict]:
     """Vector similarity search ашиглан CloudMN документацаас хайлт хийх"""
+    global vector_store
+    
+    # Global vector store шууд ашиглах
+    if vector_store is None:
+        print("❌ Vector store бэлэн биш байна!")
+        return []
+    
     try:
-        # Vector store үүсгэх эсвэл авах
-        vector_store_instance = create_vector_store()
-        
-        if not vector_store_instance:
-            print("❌ Vector store үүсгэх боломжгүй (Docs cache хоосон эсвэл crawling явагдаж байна)")
-            return []  # Хоосон list буцаах
-        
         # Хайлт хийх
-        docs_and_scores = vector_store_instance.similarity_search_with_score(query, k=max_results)
+        docs_and_scores = vector_store.similarity_search_with_score(query, k=max_results)
         
         results = []
         for doc, score in docs_and_scores:
@@ -1297,12 +1265,32 @@ def initialize_system():
     """Application эхлэх үед бүх системийг урьдчилж бэлдэх"""
     print("🚀 CloudMN Documentation System-ийг бэлдэж байна...")
     
-    # Background-д бүх процессыг эхлүүлэх
+    # 1) Crawl synchronously болон өгөгдөл цуглуулах
     print("📚 1. CloudMN docs crawling эхлүүлж байна...")
     start_background_crawling()
     
-    print("🎯 CloudMN Documentation System бэлэн болоход хэсэг хугацаа шаардагдана.")
-    print("💡 Хэрэглэгчдийн анхны асуултууд асинхрон боловсрогдоно.")
+    # 2) Тухайн crawling дууссаных хүлээж vector store үүсгэх
+    print("🎯 2. Vector store-ийг startup үед үүсгэж байна...")
+    
+    # Background thread дуустал хүлээх (максимум 60 секунд)
+    import time
+    wait_count = 0
+    max_wait = 60  # 60 секунд
+    
+    while not cloudmn_docs_cache and wait_count < max_wait:
+        print(f"⏳ Crawling дуусахыг хүлээж байна... ({wait_count + 1}/{max_wait})")
+        time.sleep(1)
+        wait_count += 1
+    
+    # Vector store үүсгэх
+    vs = create_vector_store()
+    if vs:
+        print("✅ Vector store амжилттай үүсгэлээ startup үед")
+    else:
+        print("❌ Vector store үүсгэхэд алдаа гарлаа - background процессоор үргэлжлэх")
+    
+    print("🎯 CloudMN Documentation System бэлэн болов.")
+    print("💡 Хэрэглэгчдийн асуултууд одоо хурдан боловсрогдоно.")
 
 @app.route("/system-status", methods=["GET"])
 def system_status():
