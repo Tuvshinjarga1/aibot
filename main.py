@@ -271,12 +271,16 @@ def normalize_url(base: str, link: str) -> str:
     return urljoin(base, link.split("#")[0])
 
 def scrape_single(url: str):
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    title = soup.title.string.strip() if soup.title else url
-    body, images = extract_content(soup, url)
-    return {"url": url, "title": title, "body": body, "images": images}
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        title = soup.title.string.strip() if soup.title else url
+        body, images = extract_content(soup, url)
+        return {"url": url, "title": title, "body": body, "images": images}
+    except Exception as e:
+        logging.error(f"Failed to scrape {url}: {e}")
+        raise
 
 
 # —— AI Assistant Functions —— #
@@ -446,14 +450,6 @@ def search_in_crawled_data(query: str, max_results: int = 3):
 
     return results
 
-def scrape_single(url: str):
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    title = soup.title.string.strip() if soup.title else url
-    body, images = extract_content(soup, url)
-    return {"url": url, "title": title, "body": body, "images": images}
-
 
 # —— Enhanced Chatwoot Integration —— #
 def send_to_chatwoot(conv_id: int, content: str, message_type: str = "outgoing"):
@@ -502,7 +498,7 @@ def mark_conversation_resolved(conv_id: int):
     
     try:
         resp = requests.post(api_url, json=payload, headers=headers, timeout=10)
-    resp.raise_for_status()
+        resp.raise_for_status()
         return True
     except Exception as e:
         logging.error(f"Failed to mark conversation as resolved: {e}")
