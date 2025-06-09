@@ -9,11 +9,17 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
-# CloudMN documentation crawler болон scraper-ийн dependencies
+# CloudMN documentation crawler болон vector search-ийн dependencies
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import json
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Tuple, Optional
+import numpy as np
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.schema import Document
+import tiktoken
 
 app = Flask(__name__)
 
@@ -42,6 +48,8 @@ VERIFICATION_URL_BASE = os.environ.get("VERIFICATION_URL_BASE", "http://localhos
 CLOUDMN_DOCS_BASE = "https://docs.cloud.mn/"
 CRAWL_DELAY = 1  # Секундээр хэлбэрээр серверт ачаалал багасгах
 MAX_CRAWL_PAGES = 50  # Максимум хэдэн хуудас авах
+VECTOR_SIMILARITY_THRESHOLD = 0.75  # Vector similarity хязгаар (0-1)
+MAX_VECTOR_RESULTS = 3  # Хамгийн их хэдэн үр дүн буцаах
 
 # OpenAI клиент
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -49,6 +57,8 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # CloudMN документацийн кэш хадгалах
 cloudmn_docs_cache = {}
 last_crawl_time = None
+vector_store = None
+last_vector_store_update = None
 
 class CloudMNDocsCrawler:
     """CloudMN documentation сайтыг crawl хийх класс"""
@@ -195,88 +205,136 @@ def get_cloudmn_docs_content() -> Dict[str, Dict]:
     
     return cloudmn_docs_cache
 
-def search_cloudmn_docs(query: str, max_results: int = 3) -> List[Dict]:
-    """CloudMN документацаас хайлт хийх"""
+def create_vector_store() -> FAISS:
+    """CloudMN документацийг vector store үүсгэх"""
+    global vector_store, last_vector_store_update
+    
     try:
+        # Хэрэв vector store аль хэдийн үүссэн, 1 цагийн дараа шинэчлэх
+        now = datetime.now()
+        if (vector_store is not None and 
+            last_vector_store_update is not None and 
+            (now - last_vector_store_update).total_seconds() < 3600):
+            return vector_store
+        
+        print("🔄 Vector store үүсгэж байна...")
+        
+        # Документацийн контентыг авах
         docs_content = get_cloudmn_docs_content()
         
         if not docs_content:
-            return []
+            print("❌ Документацийн контент хоосон байна")
+            return None
         
-        query_lower = query.lower()
-        results = []
-        
+        # Документуудыг бэлтгэх
+        documents = []
         for url, page_data in docs_content.items():
             title = page_data.get('title', '')
             content = page_data.get('content', '')
             
-            # Оноо тооцох (title дэх тохиролцоо илүү чухал)
-            score = 0
-            if query_lower in title.lower():
-                score += 10
-            if query_lower in content.lower():
-                score += content.lower().count(query_lower)
+            if not content.strip():
+                continue
             
-            if score > 0:
-                # Хайлтын үр дүнд тохирох хэсгийг авах
-                content_excerpt = content[:500]
-                if query_lower in content.lower():
-                    # Query орсон хэсгийг олж, түүний эргэн тойронд контекст авах
-                    start_idx = content.lower().find(query_lower)
-                    start_context = max(0, start_idx - 200)
-                    end_context = min(len(content), start_idx + 300)
-                    content_excerpt = content[start_context:end_context]
-                    if start_context > 0:
-                        content_excerpt = "..." + content_excerpt
-                    if end_context < len(content):
-                        content_excerpt = content_excerpt + "..."
-                
-                results.append({
-                    'url': url,
-                    'title': title,
-                    'content_excerpt': content_excerpt,
-                    'score': score
-                })
+            # Документуудыг жижиг хэсгүүд болгон хуваах
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=200,
+                length_function=len,
+                separators=["\n\n", "\n", " ", ""]
+            )
+            
+            chunks = text_splitter.split_text(content)
+            
+            for i, chunk in enumerate(chunks):
+                # Мета мэдээлэлтэй Document үүсгэх
+                doc = Document(
+                    page_content=chunk,
+                    metadata={
+                        "source": url,
+                        "title": title,
+                        "chunk_index": i,
+                        "total_chunks": len(chunks)
+                    }
+                )
+                documents.append(doc)
         
-        # Оноогоор эрэмбэлэж, хамгийн сайн үр дүнгүүдийг буцаах
-        results.sort(key=lambda x: x['score'], reverse=True)
-        return results[:max_results]
+        print(f"✅ {len(documents)} документ бэлтгэлээ")
+        
+        # Embeddings үүсгэх
+        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+        
+        # Vector store үүсгэх
+        vector_store = FAISS.from_documents(documents, embeddings)
+        last_vector_store_update = now
+        
+        print(f"✅ Vector store үүсгэлээ ({len(documents)} документ)")
+        
+        return vector_store
         
     except Exception as e:
-        print(f"❌ CloudMN docs хайлтад алдаа: {e}")
+        print(f"❌ Vector store үүсгэхэд алдаа: {e}")
+        return None
+
+def search_cloudmn_docs_vector(query: str, max_results: int = MAX_VECTOR_RESULTS) -> List[Dict]:
+    """Vector similarity search ашиглан CloudMN документацаас хайлт хийх"""
+    try:
+        # Vector store үүсгэх эсвэл авах
+        vector_store = create_vector_store()
+        
+        if not vector_store:
+            print("❌ Vector store үүсгэх боломжгүй")
+            return []
+        
+        # Хайлт хийх
+        docs_and_scores = vector_store.similarity_search_with_score(query, k=max_results)
+        
+        results = []
+        for doc, score in docs_and_scores:
+            # Score-г 0-1 хүрээнд хөрвүүлэх
+            similarity_score = 1.0 - score  # FAISS-ийн distance-ийг similarity болгох
+            
+            # Хэрэв similarity хязгаараас бага бол алгасах
+            if similarity_score < VECTOR_SIMILARITY_THRESHOLD:
+                continue
+            
+            # Үр дүнг бэлтгэх
+            result = {
+                'url': doc.metadata.get('source', ''),
+                'title': doc.metadata.get('title', ''),
+                'content_excerpt': doc.page_content,
+                'similarity_score': similarity_score,
+                'chunk_index': doc.metadata.get('chunk_index', 0),
+                'total_chunks': doc.metadata.get('total_chunks', 0)
+            }
+            
+            results.append(result)
+        
+        return results
+        
+    except Exception as e:
+        print(f"❌ Vector search алдаа: {e}")
         return []
 
 def enhance_ai_response_with_cloudmn_docs(message_content: str) -> str:
-    """Хэрэглэгчийн асуултанд CloudMN документацийн мэдээллийг нэмж өгөх"""
+    """Хэрэглэгчийн асуултанд CloudMN документацийн мэдээллийг нэмж өгөх (vector search)"""
     try:
-        # CloudMN-тай холбоотой түлхүүр үгүүд
-        cloudmn_keywords = [
-            'cloudmn', 'cloud.mn', 'сервер', 'instance', 'виртуал', 
-            'volume', 'диск', 'snapshot', 'security group', 'портын тохиргоо',
-            'floating ip', 'сүлжээ', 'load balancer', 'тэнцвэржүүлэгч',
-            'kubernetes', 'object storage', 'app platform', 'simplehost', 'instance holboh'
-        ]
+        print(f"🔍 CloudMN документацаас хайлт хийж байна: {message_content[:50]}...")
         
-        # Хэрэв асуулт CloudMN-тай холбоотой бол хайлт хийх
-        message_lower = message_content.lower()
-        is_cloudmn_related = any(keyword in message_lower for keyword in cloudmn_keywords)
-        
-        if not is_cloudmn_related:
-            return ""  # CloudMN-тай холбоогүй асуулт
-        
-        print(f"🔍 CloudMN холбоотой асуулт илэрлээ: {message_content[:50]}...")
-        
-        # Документацаас хайлт хийх
-        search_results = search_cloudmn_docs(message_content)
+        # Vector search хийх
+        search_results = search_cloudmn_docs_vector(message_content)
         
         if not search_results:
+            print("❌ Хайлтад тохирох үр дүн олдсонгүй")
             return ""
+        
+        print(f"✅ {len(search_results)} үр дүн олдлоо")
         
         # AI-д өгөх нэмэлт контекст бэлтгэх
         docs_context = "\n\nCloudMN документацаас олдсон холбогдох мэдээлэл:\n"
         
         for i, result in enumerate(search_results, 1):
-            docs_context += f"\n{i}. {result['title']}\n"
+            similarity_percent = int(result['similarity_score'] * 100)
+            docs_context += f"\n{i}. {result['title']} (Холбоотой байдал: {similarity_percent}%)\n"
             docs_context += f"   URL: {result['url']}\n"
             docs_context += f"   Контент: {result['content_excerpt']}\n"
         
@@ -504,7 +562,7 @@ def analyze_customer_issue(thread_id, current_message, customer_email=None):
 
 Дараах форматаар бүх чат түүхэд тулгуурлан дүгнэлт өгнө үү:
 
-АСУУДЛЫН ТӨРӨЛ: [Техникийн/Худалдааны/Мэдээллийн/Гомдол]
+АСУУДЛЫН ТӨРӨЛ: [Техникийн/Мэдээллийн/Гомдол]
 ЯАРАЛТАЙ БАЙДАЛ: [Өндөр/Дунд/Бага] 
 АСУУДЛЫН ТОВЧ ТАЙЛБАР: [Гол асуудлыг 1-2 өгүүлбэрээр]
 ЧАТЫН ХЭВ МАЯГ: [Анхны асуулт/Дагалдах асуулт/Гомдол/Тодруулга хүсэх]
@@ -1170,72 +1228,6 @@ def clean_ai_response(response_text):
     except Exception as e:
         print(f"❌ AI хариулт цэвэрлэхэд алдаа: {e}")
         return response_text.strip()
-
-@app.route("/test-cloudmn-crawler", methods=["GET"])
-def test_cloudmn_crawler():
-    """CloudMN docs crawler тест хийх"""
-    try:
-        print("🧪 CloudMN crawler тест эхэлж байна...")
-        
-        # Crawler үүсгэх
-        crawler = CloudMNDocsCrawler()
-        
-        # Зөвхөн 5 хуудас тест хийх
-        docs_content = crawler.crawl_docs(max_pages=5)
-        
-        # Үр дүнг буцаах
-        result = {
-            "status": "success",
-            "pages_crawled": len(docs_content),
-            "pages": []
-        }
-        
-        for url, page_data in docs_content.items():
-            result["pages"].append({
-                "url": url,
-                "title": page_data.get("title", "")[:100],
-                "content_length": len(page_data.get("content", "")),
-                "links_found": len(page_data.get("links", []))
-            })
-        
-        return jsonify(result), 200
-        
-    except Exception as e:
-        return jsonify({"error": f"Crawler тест алдаа: {str(e)}"}), 500
-
-@app.route("/test-cloudmn-search", methods=["GET"])
-def test_cloudmn_search():
-    """CloudMN docs хайлт тест хийх"""
-    try:
-        query = request.args.get('q', 'сервер')
-        print(f"🔍 CloudMN хайлт тест: '{query}'")
-        
-        # Хайлт хийх
-        search_results = search_cloudmn_docs(query, max_results=5)
-        
-        result = {
-            "status": "success",
-            "query": query,
-            "results_count": len(search_results),
-            "results": search_results
-        }
-        
-        return jsonify(result), 200
-        
-    except Exception as e:
-        return jsonify({"error": f"Хайлт тест алдаа: {str(e)}"}), 500
-
-@app.route("/cloudmn-docs-status", methods=["GET"])
-def cloudmn_docs_status():
-    """CloudMN документацийн кэшийн статус"""
-    global cloudmn_docs_cache, last_crawl_time
-    
-    return jsonify({
-        "cache_status": "loaded" if cloudmn_docs_cache else "empty",
-        "pages_cached": len(cloudmn_docs_cache),
-        "last_crawl_time": last_crawl_time.isoformat() if last_crawl_time else None,
-        "cache_age_hours": (datetime.now() - last_crawl_time).total_seconds() / 3600 if last_crawl_time else None
-    }), 200
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
