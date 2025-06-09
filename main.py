@@ -13,14 +13,15 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
 # —— Config —— #
-ROOT_URL             = "https://docs.cloud.mn/"
-DELAY_SEC            = 0.5
+ROOT_URL             = os.getenv("ROOT_URL", "https://docs.cloud.mn/")
+DELAY_SEC            = float(os.getenv("DELAY_SEC", "0.5"))
 ALLOWED_NETLOC       = urlparse(ROOT_URL).netloc
-MAX_CRAWL_PAGES      = 50
+MAX_CRAWL_PAGES      = int(os.getenv("MAX_CRAWL_PAGES", "50"))
 CHATWOOT_API_KEY     = os.getenv("CHATWOOT_API_KEY")
 ACCOUNT_ID           = os.getenv("ACCOUNT_ID")
 CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com")
 OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
+AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true"
 
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -28,6 +29,44 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 # —— Memory Storage —— #
 conversation_memory = {}
 crawled_data = []
+crawl_status = {"status": "not_started", "message": "Crawling has not started yet"}
+
+# —— Startup Functions —— #
+def auto_crawl_on_startup():
+    """Automatically crawl the site on startup"""
+    global crawled_data, crawl_status
+    
+    if not AUTO_CRAWL_ON_START:
+        crawl_status = {"status": "disabled", "message": "Auto-crawl is disabled"}
+        logging.info("Auto-crawl is disabled")
+        return
+    
+    try:
+        logging.info(f"🚀 Starting automatic crawl of {ROOT_URL}")
+        crawl_status = {"status": "running", "message": f"Crawling {ROOT_URL}..."}
+        
+        crawled_data = crawl_and_scrape(ROOT_URL)
+        
+        if crawled_data:
+            crawl_status = {
+                "status": "completed", 
+                "message": f"Successfully crawled {len(crawled_data)} pages",
+                "pages_count": len(crawled_data),
+                "timestamp": datetime.now().isoformat()
+            }
+            logging.info(f"✅ Auto-crawl completed: {len(crawled_data)} pages")
+        else:
+            crawl_status = {"status": "failed", "message": "No pages were crawled"}
+            logging.warning("❌ Auto-crawl failed: No pages found")
+            
+    except Exception as e:
+        crawl_status = {"status": "error", "message": f"Crawl error: {str(e)}"}
+        logging.error(f"❌ Auto-crawl error: {e}")
+
+# Start auto-crawl in background when app starts
+import threading
+if AUTO_CRAWL_ON_START:
+    threading.Thread(target=auto_crawl_on_startup, daemon=True).start()
 
 # —— Content Extraction —— #
 def extract_content(soup: BeautifulSoup, base_url: str):
@@ -160,7 +199,7 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     
     try:
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4.1",
             messages=messages,
             max_tokens=300,
             temperature=0.7
@@ -302,20 +341,38 @@ def chatwoot_webhook():
     
     # Handle different commands
     if text.lower() == "crawl":
-        send_to_chatwoot(conv_id, f"🔄 Сайн байна уу {contact_name}! Сайтыг шүүрдэж байна, түр хүлээнэ үү...")
-        
-        global crawled_data
-        crawled_data = crawl_and_scrape(ROOT_URL)
-        
-        if not crawled_data:
-            send_to_chatwoot(conv_id, "❌ Шүүрдэх явцад алдаа гарлаа. Дахин оролдоно уу.")
-        else:
-            lines = [f"📄 {p['title']} — {p['url']}" for p in crawled_data[:3]]
-            send_to_chatwoot(conv_id,
-                f"✅ {len(crawled_data)} хуудас амжилттай шүүрдлээ!\n\n"
-                f"Эхний 3 хуудас:\n" + "\n".join(lines) + 
-                f"\n\nОдоо 'search <асуулт>' командаар хайлт хийж болно!"
+        # Check if auto-crawl already completed
+        if crawl_status["status"] == "completed":
+            send_to_chatwoot(conv_id, 
+                f"✅ Сайт аль хэдийн шүүрдэгдсэн байна! "
+                f"{crawl_status.get('pages_count', 0)} хуудас бэлэн.\n\n"
+                f"'search <асуулт>' командаар хайлт хийж болно!"
             )
+        elif crawl_status["status"] == "running":
+            send_to_chatwoot(conv_id, "🔄 Сайт одоо шүүрдэгдэж байна. Түр хүлээнэ үү...")
+        else:
+            send_to_chatwoot(conv_id, f"🔄 Сайн байна уу {contact_name}! Сайтыг шүүрдэж байна...")
+            
+            global crawled_data, crawl_status
+            crawl_status = {"status": "running", "message": f"Manual crawl started by {contact_name}"}
+            crawled_data = crawl_and_scrape(ROOT_URL)
+            
+            if not crawled_data:
+                crawl_status = {"status": "failed", "message": "Manual crawl failed"}
+                send_to_chatwoot(conv_id, "❌ Шүүрдэх явцад алдаа гарлаа. Дахин оролдоно уу.")
+            else:
+                crawl_status = {
+                    "status": "completed", 
+                    "message": f"Manual crawl completed by {contact_name}",
+                    "pages_count": len(crawled_data),
+                    "timestamp": datetime.now().isoformat()
+                }
+                lines = [f"📄 {p['title']} — {p['url']}" for p in crawled_data[:3]]
+                send_to_chatwoot(conv_id,
+                    f"✅ {len(crawled_data)} хуудас амжилттай шүүрдлээ!\n\n"
+                    f"Эхний 3 хуудас:\n" + "\n".join(lines) + 
+                    f"\n\nОдоо 'search <асуулт>' командаар хайлт хийж болно!"
+                )
 
     elif text.lower().startswith("scrape"):
         parts = text.split(maxsplit=1)
@@ -344,16 +401,19 @@ def chatwoot_webhook():
         else:
             query = parts[1].strip()
             
-            if not crawled_data:
+            # Check crawl status first
+            if crawl_status["status"] == "running":
+                send_to_chatwoot(conv_id, "🔄 Сайт шүүрдэгдэж байна. Түр хүлээгээд дахин оролдоно уу.")
+            elif crawl_status["status"] in ["not_started", "failed", "error"] or not crawled_data:
                 send_to_chatwoot(conv_id, 
-                    "📚 Эхлээд 'crawl' командыг ашиглан сайтыг шүүрдүүлнэ үү."
+                    "📚 Мэдээлэл бэлэн байхгүй байна. 'crawl' командыг ашиглан сайтыг шүүрдүүлнэ үү."
                 )
             else:
                 send_to_chatwoot(conv_id, f"🔍 '{query}' хайж байна...")
                 
                 results = search_in_crawled_data(query)
                 if results:
-                    response = f"🔍 '{query}' хайлтын үр дүн:\n\n"
+                    response = f"🔍 '{query}' хайлтын үр дүн ({len(results)} илэрц):\n\n"
                     for i, result in enumerate(results, 1):
                         response += f"{i}. **{result['title']}**\n"
                         response += f"   {result['snippet']}\n"
@@ -364,11 +424,23 @@ def chatwoot_webhook():
                     send_to_chatwoot(conv_id, f"❌ '{query}' хайлтаар илэрц олдсонгүй.")
 
     elif text.lower() in ["help", "тусламж"]:
+        # Show status-aware help
+        status_info = ""
+        if crawl_status["status"] == "completed":
+            status_info = f"✅ {crawl_status.get('pages_count', 0)} хуудас бэлэн байна.\n"
+        elif crawl_status["status"] == "running":
+            status_info = "🔄 Сайт шүүрдэгдэж байна.\n"
+        elif crawl_status["status"] == "disabled":
+            status_info = "⚠️ Автомат шүүрдэх идэвхгүй байна.\n"
+        
         help_text = f"""
 👋 Сайн байна уу {contact_name}! Би Cloud.mn-ийн AI туслах юм.
 
+📊 **Төлөв:**
+{status_info}
+
 🤖 **Боломжит командууд:**
-• `crawl` - Бүх сайтыг шүүрдэх
+• `crawl` - Сайтыг шүүрдэх (шаардлагатай бол)
 • `scrape <URL>` - Тодорхой хуудас шүүрдэх
 • `search <асуулт>` - Мэдээлэл хайх
 • `help` - Энэ тусламжийг харуулах
@@ -394,6 +466,76 @@ def chatwoot_webhook():
 
 
 # —— Additional API Endpoints —— #
+@app.route("/api/crawl-status", methods=["GET"])
+def get_crawl_status():
+    """Get current crawl status"""
+    return jsonify({
+        "crawl_status": crawl_status,
+        "crawled_pages": len(crawled_data),
+        "config": {
+            "root_url": ROOT_URL,
+            "auto_crawl_enabled": AUTO_CRAWL_ON_START,
+            "max_pages": MAX_CRAWL_PAGES
+        }
+    })
+
+@app.route("/api/force-crawl", methods=["POST"])
+def force_crawl():
+    """Force start a new crawl"""
+    global crawled_data, crawl_status
+    
+    # Check if already running
+    if crawl_status["status"] == "running":
+        return jsonify({"error": "Crawl is already running"}), 409
+    
+    try:
+        crawl_status = {"status": "running", "message": "Force crawl started via API"}
+        crawled_data = crawl_and_scrape(ROOT_URL)
+        
+        if crawled_data:
+            crawl_status = {
+                "status": "completed",
+                "message": f"Force crawl completed via API",
+                "pages_count": len(crawled_data),
+                "timestamp": datetime.now().isoformat()
+            }
+            return jsonify({
+                "status": "success",
+                "pages_crawled": len(crawled_data),
+                "crawl_status": crawl_status
+            })
+        else:
+            crawl_status = {"status": "failed", "message": "Force crawl failed - no pages found"}
+            return jsonify({"error": "No pages were crawled"}), 500
+            
+    except Exception as e:
+        crawl_status = {"status": "error", "message": f"Force crawl error: {str(e)}"}
+        return jsonify({"error": f"Crawl failed: {e}"}), 500
+
+@app.route("/api/search", methods=["POST"])
+def api_search():
+    """Search through crawled data via API"""
+    data = request.get_json(force=True)
+    query = data.get("query", "").strip()
+    max_results = data.get("max_results", 5)
+    
+    if not query:
+        return jsonify({"error": "Missing 'query' in request body"}), 400
+    
+    if crawl_status["status"] == "running":
+        return jsonify({"error": "Crawl is currently running, please wait"}), 409
+    
+    if not crawled_data:
+        return jsonify({"error": "No crawled data available. Run crawl first."}), 404
+    
+    results = search_in_crawled_data(query, max_results)
+    return jsonify({
+        "query": query,
+        "results_count": len(results),
+        "results": results,
+        "crawl_status": crawl_status
+    })
+
 @app.route("/api/conversation/<int:conv_id>/memory", methods=["GET"])
 def get_conversation_memory(conv_id):
     """Get conversation memory for debugging"""
@@ -410,7 +552,12 @@ def clear_conversation_memory(conv_id):
 @app.route("/api/crawled-data", methods=["GET"])
 def get_crawled_data():
     """Get current crawled data"""
-    return jsonify({"pages": len(crawled_data), "data": crawled_data[:10]})  # First 10 pages
+    page_limit = request.args.get('limit', 10, type=int)
+    return jsonify({
+        "total_pages": len(crawled_data), 
+        "crawl_status": crawl_status,
+        "data": crawled_data[:page_limit]
+    })
 
 @app.route("/health", methods=["GET"])
 def health_check():
@@ -418,8 +565,15 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
+        "crawl_status": crawl_status,
         "crawled_pages": len(crawled_data),
-        "active_conversations": len(conversation_memory)
+        "active_conversations": len(conversation_memory),
+        "config": {
+            "root_url": ROOT_URL,
+            "auto_crawl_enabled": AUTO_CRAWL_ON_START,
+            "openai_configured": client is not None,
+            "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID)
+        }
     })
 
 
