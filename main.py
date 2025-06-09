@@ -220,6 +220,11 @@ def start_background_crawling():
                 cloudmn_docs_cache = new_cache
                 last_crawl_time = datetime.now()
                 print(f"✅ Background crawling дууслаа ({len(new_cache)} хуудас)")
+                
+                # Crawling дууссаны дараа шууд vector store үүсгэх
+                print("🔄 Vector store background-д үүсгэж байна...")
+                start_background_vector_store_creation()
+                
             else:
                 print("❌ Background crawling хоосон үр дүн")
                 
@@ -230,6 +235,34 @@ def start_background_crawling():
     thread = threading.Thread(target=background_crawl, daemon=True)
     thread.start()
     print("🔄 Background crawling thread эхлэлээ")
+
+def start_background_vector_store_creation():
+    """Background thread-д vector store үүсгэх"""
+    def background_vector_creation():
+        global vector_store, last_vector_store_update
+        try:
+            print("🤖 Background vector store үүсгэж байна...")
+            
+            # Хэрэв аль хэдийн байгаа бол алгасах
+            if vector_store is not None:
+                print("✅ Vector store аль хэдийн үүссэн байна")
+                return
+            
+            # Vector store үүсгэх
+            new_vector_store = create_vector_store()
+            
+            if new_vector_store:
+                print("✅ Background vector store амжилттай үүсгэлээ")
+            else:
+                print("❌ Background vector store үүсгэхэд алдаа")
+                
+        except Exception as e:
+            print(f"❌ Background vector store алдаа: {e}")
+    
+    # Background thread эхлүүлэх
+    thread = threading.Thread(target=background_vector_creation, daemon=True)
+    thread.start()
+    print("🔄 Background vector store thread эхлэлээ")
 
 def create_vector_store() -> FAISS:
     """CloudMN документацийг vector store үүсгэх"""
@@ -581,6 +614,7 @@ def analyze_customer_issue(thread_id, current_message, customer_email=None):
             "Тухайн асуудлыг чадахаар байвал өөрийн мэдлэгийн хүрээнд шийдвэрлэж өгнө үү. "
             "Хэрэглэгчийн бүх чат түүхийг харж, асуудлыг иж бүрэн дүгнэж өгнө үү. "
             "Хэрэв олон асуудал байвал гол асуудлыг тодорхойлж фокуслана уу."
+            "Монголоор хариулна."
         )
 
         # Comprehensive user prompt
@@ -1259,10 +1293,81 @@ def clean_ai_response(response_text):
         print(f"❌ AI хариулт цэвэрлэхэд алдаа: {e}")
         return response_text.strip()
 
+def initialize_system():
+    """Application эхлэх үед бүх системийг урьдчилж бэлдэх"""
+    print("🚀 CloudMN Documentation System-ийг бэлдэж байна...")
+    
+    # Background-д бүх процессыг эхлүүлэх
+    print("📚 1. CloudMN docs crawling эхлүүлж байна...")
+    start_background_crawling()
+    
+    print("🎯 CloudMN Documentation System бэлэн болоход хэсэг хугацаа шаардагдана.")
+    print("💡 Хэрэглэгчдийн анхны асуултууд асинхрон боловсрогдоно.")
+
+@app.route("/system-status", methods=["GET"])
+def system_status():
+    """CloudMN Documentation System-ийн бүрэн статус"""
+    global cloudmn_docs_cache, last_crawl_time, vector_store, last_vector_store_update
+    
+    current_time = datetime.now()
+    
+    # Crawling статус
+    crawling_status = {
+        "cache_loaded": bool(cloudmn_docs_cache),
+        "pages_cached": len(cloudmn_docs_cache) if cloudmn_docs_cache else 0,
+        "last_crawl_time": last_crawl_time.isoformat() if last_crawl_time else None,
+        "cache_age_hours": (current_time - last_crawl_time).total_seconds() / 3600 if last_crawl_time else None
+    }
+    
+    # Vector store статус
+    vector_status = {
+        "vector_store_loaded": vector_store is not None,
+        "last_update_time": last_vector_store_update.isoformat() if last_vector_store_update else None,
+        "update_age_hours": (current_time - last_vector_store_update).total_seconds() / 3600 if last_vector_store_update else None
+    }
+    
+    # Ерөнхий ready байдал
+    system_ready = bool(cloudmn_docs_cache) and (vector_store is not None)
+    
+    return jsonify({
+        "system_ready": system_ready,
+        "ready_percentage": (
+            (50 if cloudmn_docs_cache else 0) + 
+            (50 if vector_store is not None else 0)
+        ),
+        "crawling": crawling_status,
+        "vector_store": vector_status,
+        "message": (
+            "✅ Систем бэлэн байна" if system_ready 
+            else "🔄 Систем бэлдэгдэж байна... Түр хүлээнэ үү"
+        )
+    }), 200
+
+@app.route("/refresh-system", methods=["POST"])
+def refresh_system():
+    """CloudMN Documentation System-ийг дахин бэлдэх (Admin endpoint)"""
+    try:
+        print("🔄 Manual system refresh хүсэлт ирлээ...")
+        
+        # Background refresh эхлүүлэх
+        start_background_crawling()
+        
+        return jsonify({
+            "status": "success",
+            "message": "🔄 CloudMN Documentation System refresh эхлүүлэв. /system-status endpoint-оор прогрессийг шалгана уу.",
+            "estimated_time": "2-3 минут"
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error", 
+            "message": f"System refresh алдаа: {str(e)}"
+        }), 500
+
 if __name__ == "__main__":
     # Application эхлэх үед background crawling эхлүүлэх
     print("🚀 Flask application эхэлж байна...")
     print("🔄 Анхны CloudMN docs crawling background-д эхлүүлж байна...")
-    start_background_crawling()
+    initialize_system()
     
     app.run(debug=True, port=5000)
