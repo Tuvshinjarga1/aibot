@@ -4,10 +4,16 @@ import logging
 import requests
 from openai import OpenAI
 import json
+import re
+import smtplib
+import random
+import string
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from urllib.parse import urljoin, urlparse
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -24,6 +30,12 @@ OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
 AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true"
 TEAMS_WEBHOOK_URL    = os.getenv("TEAMS_WEBHOOK_URL")  # Microsoft Teams webhook URL
 
+# Email verification config
+SMTP_SERVER          = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT            = int(os.getenv("SMTP_PORT", "587"))
+EMAIL_ADDRESS        = os.getenv("SENDER_EMAIL")  # Sender email
+EMAIL_PASSWORD       = os.getenv("SENDER_PASSWORD")  # App password for Gmail
+
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -31,6 +43,122 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 conversation_memory = {}
 crawled_data = []
 crawl_status = {"status": "not_started", "message": "Crawling has not started yet"}
+email_verification_codes = {}  # Store verification codes temporarily
+
+# —— Email Verification Functions —— #
+def is_valid_email(email: str) -> bool:
+    """Check if email format is valid"""
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
+
+def generate_verification_code() -> str:
+    """Generate 6-digit verification code"""
+    return ''.join(random.choices(string.digits, k=6))
+
+def send_verification_email(email: str, code: str) -> bool:
+    """Send verification email with code"""
+    if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
+        logging.warning("Email credentials not configured")
+        return False
+    
+    try:
+        # Create message
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_ADDRESS
+        msg['To'] = email
+        msg['Subject'] = "Cloud.mn AI - Имэйл баталгаажуулалт"
+        
+        # Email body
+        body = f"""
+Сайн байна уу!
+
+Таны Cloud.mn AI дэмжлэг хүсэлтийг баталгаажуулахын тулд доорх кодыг ашиглана уу:
+
+Баталгаажуулалтын код: {code}
+
+Энэ код 10 минут хүчинтэй байна.
+
+Хэрэв та энэ хүсэлтийг илгээгээгүй бол энэ имэйлийг үл тоомсорлоно уу.
+
+Баярлалаа,
+Cloud.mn AI Баг
+        """
+        
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        
+        # Send email
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        text = msg.as_string()
+        server.sendmail(EMAIL_ADDRESS, email, text)
+        server.quit()
+        
+        logging.info(f"Verification email sent to {email}")
+        return True
+        
+    except Exception as e:
+        logging.error(f"Failed to send verification email: {e}")
+        return False
+
+def store_verification_code(email: str, code: str):
+    """Store verification code with expiration time"""
+    email_verification_codes[email] = {
+        'code': code,
+        'expires_at': datetime.now() + timedelta(minutes=10),
+        'verified': False
+    }
+
+def verify_email_code(email: str, code: str) -> bool:
+    """Verify email code"""
+    if email not in email_verification_codes:
+        return False
+    
+    stored_data = email_verification_codes[email]
+    
+    # Check if code expired
+    if datetime.now() > stored_data['expires_at']:
+        del email_verification_codes[email]
+        return False
+    
+    # Check if code matches
+    if stored_data['code'] == code:
+        email_verification_codes[email]['verified'] = True
+        return True
+    
+    return False
+
+def is_email_verified(email: str) -> bool:
+    """Check if email is verified"""
+    if email not in email_verification_codes:
+        return False
+    
+    stored_data = email_verification_codes[email]
+    
+    # Check if expired
+    if datetime.now() > stored_data['expires_at']:
+        del email_verification_codes[email]
+        return False
+    
+    return stored_data.get('verified', False)
+
+def send_email_verification_request(email: str) -> dict:
+    """Send verification email and return result"""
+    if not is_valid_email(email):
+        return {"success": False, "message": "Буруу имэйл хаяг"}
+    
+    if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
+        return {"success": False, "message": "Имэйл тохиргоо хийгдээгүй байна"}
+    
+    # Generate and store code
+    code = generate_verification_code()
+    store_verification_code(email, code)
+    
+    # Send email
+    if send_verification_email(email, code):
+        return {"success": True, "message": f"Баталгаажуулалтын код {email} хаяг руу илгээгдлээ"}
+    else:
+        return {"success": False, "message": "Имэйл илгээхэд алдаа гарлаа"}
 
 # —— Crawl & Scrape —— #
 def crawl_and_scrape(start_url: str):
@@ -315,7 +443,7 @@ def search_in_crawled_data(query: str, max_results: int = 3):
             'snippet': best_snippet,
             'relevance_score': score
         })
-            
+
     return results
 
 def scrape_single(url: str):
@@ -374,7 +502,7 @@ def mark_conversation_resolved(conv_id: int):
     
     try:
         resp = requests.post(api_url, json=payload, headers=headers, timeout=10)
-        resp.raise_for_status()
+    resp.raise_for_status()
         return True
     except Exception as e:
         logging.error(f"Failed to mark conversation as resolved: {e}")
@@ -442,8 +570,15 @@ def send_teams_notification(conv_id: int, message: str, message_type: str = "out
         contact_name = contact.get("name", "Хэрэглэгч")
         contact_email = contact.get("email", "Имэйл олдсонгүй")
         
-        # Create Teams message with simpler format
-        teams_message = f"""
+        # Only send to Teams if confirmed AND email is verified
+        if confirmed:
+            # Check if email is verified (if email is available)
+            if contact_email != "Имэйл олдсонгүй" and not is_email_verified(contact_email):
+                logging.warning(f"Email {contact_email} not verified, skipping Teams notification")
+                return
+            
+            # Create Teams message with simpler format
+            teams_message = f"""
 Cloud.mn AI - {contact_name}
 {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
@@ -455,15 +590,15 @@ Cloud.mn AI - {contact_name}
 Харилцан ярианы ID: {conv_id}
 
 Алдаа: {message}
-        """
-        
-        # Send to Teams with HTML format
-        send_to_teams(
-            message=teams_message,
-            title=f"Cloud.mn AI - {contact_name}",
-            color="0076D7",  # Default blue color
-            conv_id=conv_id  # Pass conv_id for Chatwoot URL
-        )
+            """
+            
+            # Send to Teams with HTML format
+            send_to_teams(
+                message=teams_message,
+                title=f"Cloud.mn AI - {contact_name}",
+                color="0076D7",  # Default blue color
+                conv_id=conv_id  # Pass conv_id for Chatwoot URL
+            )
         
     except Exception as e:
         logging.error(f"Failed to send Teams notification: {e}")
@@ -605,6 +740,42 @@ def chatwoot_webhook():
                     send_to_chatwoot(conv_id, response)
                     send_teams_notification(conv_id, response, "outgoing")
 
+    elif text.lower().startswith("verify-email"):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            send_to_chatwoot(conv_id, "⚠️ Зөв хэлбэр: `verify-email <имэйл хаяг>`")
+        else:
+            email = parts[1].strip()
+            result = send_email_verification_request(email)
+            
+            if result["success"]:
+                send_to_chatwoot(conv_id, f"✅ {result['message']}\n\nБаталгаажуулалтын кодыг авсны дараа `confirm-email <код>` командыг ашиглана уу.")
+            else:
+                send_to_chatwoot(conv_id, f"❌ {result['message']}")
+
+    elif text.lower().startswith("confirm-email"):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            send_to_chatwoot(conv_id, "⚠️ Зөв хэлбэр: `confirm-email <6 оронтой код>`")
+        else:
+            code = parts[1].strip()
+            
+            # Get user's email from conversation
+            conv_info = get_conversation_info(conv_id)
+            if not conv_info:
+                send_to_chatwoot(conv_id, "❌ Харилцан ярианы мэдээлэл олдсонгүй.")
+                return jsonify({"status": "error"}), 200
+            
+            contact = conv_info.get("contact", {})
+            contact_email = contact.get("email")
+            
+            if not contact_email:
+                send_to_chatwoot(conv_id, "❌ Таны имэйл хаяг олдсонгүй. Эхлээд `verify-email <имэйл хаяг>` командыг ашиглана уу.")
+            elif verify_email_code(contact_email, code):
+                send_to_chatwoot(conv_id, "✅ Имэйл амжилттай баталгаажлаа! Одоо дэмжлэгийн баг руу хүсэлт илгээх боломжтой болсон.")
+            else:
+                send_to_chatwoot(conv_id, "❌ Буруу код эсвэл хугацаа дууссан. Дахин оролдоно уу.")
+
     elif text.lower() in ["help", "тусламж"]:
         # Show status-aware help
         status_info = ""
@@ -625,10 +796,15 @@ def chatwoot_webhook():
 • `crawl` - Сайтыг шүүрдэх (шаардлагатай бол)
 • `scrape <URL>` - Тодорхой хуудас шүүрдэх
 • `search <асуулт>` - Мэдээлэл хайх
+• `verify-email <имэйл>` - Имэйл баталгаажуулах
+• `confirm-email <код>` - Баталгаажуулалтын код оруулах
 • `help` - Энэ тусламжийг харуулах
 
 💬 **Чөлөөт ярилцлага:**
 Та мөн надад асуулт асууж, ярилцаж болно. Би монгол хэлээр хариулна.
+
+📧 **Имэйл баталгаажуулалт:**
+Дэмжлэгийн баг руу хүсэлт илгээхийн тулд эхлээд имэйлээ баталгаажуулна уу.
 
 ⏰ Үргэлж тусламжид бэлэн байна!
         """
@@ -648,7 +824,7 @@ def chatwoot_webhook():
             # Use GPT to understand the response
             confirmation_response = client.chat.completions.create(
                 model="gpt-4",
-                messages=[
+                    messages=[
                     {
                         "role": "system",
                         "content": """Та хэрэглэгчийн хариултыг дүгнэж, зөвшөөрөл эсвэл татгалзлыг тодорхойлох ёстой.
@@ -683,7 +859,7 @@ def chatwoot_webhook():
             ai_response = get_ai_response(text, conv_id, crawled_data)
             send_to_chatwoot(conv_id, ai_response)
             
-            # Check if AI couldn't help (only send to Teams if there's an issue)
+            # Check if AI couldn't help
             if any(keyword in ai_response.lower() for keyword in ["ойлгомжгүй", "тодорхойгүй", "алдаа", "саад"]):
                 # Ask for confirmation before sending to Teams
                 confirmation_message = f"""
@@ -702,7 +878,7 @@ AI хариулт: {ai_response}
                     conversation_memory[conv_id] = []
                 conversation_memory[conv_id].append({"role": "assistant", "content": confirmation_message + " pending_confirmation"})
                 
-                # Send to Teams as pending confirmation (ONLY for unresolved issues)
+                # Send to Teams as pending confirmation
                 send_teams_notification(
                     conv_id,
                     f"AI хариулт: {ai_response}\n\nХэрэглэгчийн асуулт: {text}",
@@ -754,7 +930,7 @@ def force_crawl():
                 "pages_crawled": len(crawled_data),
                 "crawl_status": crawl_status
             })
-        else:
+    else:
             crawl_status = {"status": "failed", "message": "Force crawl failed - no pages found"}
             return jsonify({"error": "No pages were crawled"}), 500
             
@@ -825,6 +1001,62 @@ def health_check():
             "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID)
         }
     })
+
+
+# —— Email Verification API Endpoints —— #
+@app.route("/api/email/send-verification", methods=["POST"])
+def api_send_email_verification():
+    """Send email verification code"""
+    try:
+        data = request.get_json(force=True)
+        email = data.get("email", "").strip()
+        
+        if not email:
+            return jsonify({"error": "Имэйл хаяг шаардлагатай"}), 400
+        
+        result = send_email_verification_request(email)
+        
+        if result["success"]:
+            return jsonify({"message": result["message"]}), 200
+        else:
+            return jsonify({"error": result["message"]}), 400
+            
+    except Exception as e:
+        logging.error(f"Error sending email verification: {e}")
+        return jsonify({"error": "Имэйл илгээхэд алдаа гарлаа"}), 500
+
+@app.route("/api/email/verify", methods=["POST"])
+def api_verify_email():
+    """Verify email with code"""
+    try:
+        data = request.get_json(force=True)
+        email = data.get("email", "").strip()
+        code = data.get("code", "").strip()
+        
+        if not email or not code:
+            return jsonify({"error": "Имэйл хаяг болон код шаардлагатай"}), 400
+        
+        if verify_email_code(email, code):
+            return jsonify({"message": "Имэйл амжилттай баталгаажлаа"}), 200
+        else:
+            return jsonify({"error": "Буруу код эсвэл хугацаа дууссан"}), 400
+            
+    except Exception as e:
+        logging.error(f"Error verifying email: {e}")
+        return jsonify({"error": "Баталгаажуулахад алдаа гарлаа"}), 500
+
+@app.route("/api/email/status/<email>", methods=["GET"])
+def api_email_verification_status(email):
+    """Check email verification status"""
+    try:
+        if is_email_verified(email):
+            return jsonify({"verified": True, "message": "Имэйл баталгаажсан"})
+        else:
+            return jsonify({"verified": False, "message": "Имэйл баталгаажаагүй эсвэл хугацаа дууссан"})
+            
+    except Exception as e:
+        logging.error(f"Error checking email status: {e}")
+        return jsonify({"error": "Төлөв шалгахад алдаа гарлаа"}), 500
 
 
 if __name__ == "__main__":
