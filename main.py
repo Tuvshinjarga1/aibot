@@ -8,6 +8,7 @@ from urllib.parse import urljoin, urlparse
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
 from datetime import datetime
+import re
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -329,34 +330,55 @@ def scrape_single(url: str):
 
 # —— AI Analysis Functions —— #
 def analyze_user_message_with_ai(user_message: str, ai_response: str, conv_id: int):
-    """Use AI to analyze if user needs support team and identify the actual problem"""
+    """Use AI to analyze conversation history and identify the core problem"""
     if not client:
         return {"needs_support": False, "problem_description": "", "confidence": 0}
     
     try:
+        # Get full conversation history
+        conversation_history = conversation_memory.get(conv_id, [])
+        
+        # Extract user messages from conversation history
+        user_messages = []
+        for msg in conversation_history:
+            if msg.get("role") == "user":
+                user_messages.append(msg.get("content", ""))
+        
+        # Add current message if not already in history
+        if user_message not in user_messages:
+            user_messages.append(user_message)
+        
+        # Combine all user messages for analysis
+        full_conversation = "\n".join(user_messages)
+        
         # Create service list for AI analysis
         service_list = "\n".join([f"- {key}" for key in SERVICE_PRICES.keys()])
         
         analysis_prompt = f"""
-Хэрэглэгчийн асуулт болон AI хариултыг дүгнэж, дараах асуултуудад хариулна уу:
+Хэрэглэгчийн бүх харилцан ярианы түүхийг дүгнэж, зөвхөн хамгийн чухал асуудлыг олж тодорхойлно уу.
 
-1. Хэрэглэгч дэмжлэгийн багтай холбогдох шаардлагатай юу? (техникийн асуудал, төвөгтэй асуудал, AI хариулт хангалтгүй)
-2. Хэрэглэгчийн тулгарч байгаа асуудлыг товчхон тодорхойлно уу
-3. Хэрэглэгчийн асуулт дараах үйлчилгээнүүдтэй тохирч байна уу?
+Хэрэглэгчийн бүх мессэжүүд:
+{full_conversation}
+
+Хэрэглэгчийн сүүлийн AI хариулт: {ai_response}
+
+Даалгавар:
+1. Хэрэглэгч дэмжлэгийн багтай холбогдох шаардлагатай юу?
+2. Хэрэглэгчийн ХАМГИЙН ЧУХАЛ асуудлыг олж тодорхойлно уу (бусад дутуу зүйлсийг орхино)
+3. Асуудлыг 1 өгүүлбэрээр товч тодорхой тайлбарлана уу
 
 Үйлчилгээний жагсаалт:
 {service_list}
 
-Хэрэглэгчийн асуулт: {user_message}
-AI хариулт: {ai_response}
+АНХААРАХ: Зөвхөн гол асуудлыг олж Teams рүү илгээх. Жижиг асуулт, ерөнхий мэдээлэл, эсвэл хэвийн хариулт бол дэмжлэг хэрэггүй.
 
 Хариултаа JSON форматаар өг:
 {{
     "needs_support": true/false,
     "confidence": 0-100,
-    "problem_description": "хэрэглэгчийн тулгарч байгаа асуудлын товч тайлбар",
-    "matching_services": ["тохирох үйлчилгээний нэр1", "тохирох үйлчилгээний нэр2"],
-    "suggested_action": "санал болгох үйлдэл"
+    "core_problem": "хамгийн чухал асуудлын 1 өгүүлбэрийн тайлбар",
+    "matching_services": ["тохирох үйлчилгээ"],
+    "is_critical": true/false
 }}
         """
         
@@ -365,42 +387,99 @@ AI хариулт: {ai_response}
             messages=[
                 {
                     "role": "system", 
-                    "content": "Та мэргэжлийн дүгнэлт хийгч. Хэрэглэгчийн хэрэгцээг тодорхойлж, асуудлыг товч тодорхой тайлбарлаж чаддаг."
+                    "content": "Та харилцан ярианы дүгнэлт хийгч мэргэжилтэн. Хэрэглэгчийн түүхээс зөвхөн хамгийн чухал асуудлыг олж, дэмжлэгийн багт шаардлагатай эсэхийг тодорхойлдог."
                 },
                 {
                     "role": "user", 
                     "content": analysis_prompt
                 }
             ],
-            max_tokens=300,
-            temperature=0.3
+            max_tokens=250,
+            temperature=0.2
         )
         
         analysis_text = response.choices[0].message.content.strip()
         
         # Try to parse JSON response
-        import re
         json_match = re.search(r'\{.*\}', analysis_text, re.DOTALL)
         if json_match:
             analysis_json = json.loads(json_match.group())
+            # Use core_problem as problem_description for compatibility
+            analysis_json["problem_description"] = analysis_json.get("core_problem", "")
             return analysis_json
         else:
-            # Fallback analysis
+            # Fallback analysis using AI to determine if issue is critical
+            if client:
+                try:
+                    fallback_prompt = f"""
+Хэрэглэгчийн бүх харилцлага: {full_conversation}
+
+Энэ харилцлагыг дүгнэж дараах асуултанд хариулна уу:
+1. Энэ нь жинхэнэ техникийн асуудал мөн үү?
+2. Дэмжлэгийн баг шаардлагатай мөн үү?
+3. Хэр чухал вэ? (1-100)
+
+JSON хэлбэрээр хариулна уу:
+{{
+    "needs_support": true/false,
+    "is_critical": true/false,
+    "confidence": 0-100,
+    "core_problem": "асуудлын товч тайлбар"
+}}
+                    """
+                    
+                    fallback_response = client.chat.completions.create(
+                        model="gpt-4",
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "Та техникийн асуудлыг тодорхойлох мэргэжилтэн. Хэрэглэгчийн харилцлагаас жинхэнэ асуудлыг олж чаддаг."
+                            },
+                            {
+                                "role": "user",
+                                "content": fallback_prompt
+                            }
+                        ],
+                        max_tokens=150,
+                        temperature=0.2
+                    )
+                    
+                    fallback_text = fallback_response.choices[0].message.content.strip()
+                    fallback_match = re.search(r'\{.*\}', fallback_text, re.DOTALL)
+                    
+                    if fallback_match:
+                        fallback_json = json.loads(fallback_match.group())
+                        return {
+                            "needs_support": fallback_json.get("needs_support", False),
+                            "problem_description": fallback_json.get("core_problem", user_message[:100]),
+                            "core_problem": fallback_json.get("core_problem", user_message[:100]),
+                            "matching_services": [],
+                            "confidence": fallback_json.get("confidence", 20),
+                            "is_critical": fallback_json.get("is_critical", False),
+                            "suggested_action": "AI fallback analysis"
+                        }
+                except Exception as e:
+                    logging.error(f"AI fallback analysis failed: {e}")
+            
+            # Final fallback if AI is not available
             return {
-                "needs_support": "алдаа" in user_message.lower() or "асуудал" in user_message.lower() or "ажилахгүй" in user_message.lower(),
-                "problem_description": user_message[:100] + "..." if len(user_message) > 100 else user_message,
-                "matching_services": [],
-                "confidence": 50,
-                "suggested_action": "Manual review шаардлагатай"
+                "needs_support": False, 
+                "problem_description": user_message[:50] + "..." if len(user_message) > 50 else user_message,
+                "core_problem": user_message[:50] + "..." if len(user_message) > 50 else user_message,
+                "matching_services": [], 
+                "confidence": 0,
+                "is_critical": False
             }
             
     except Exception as e:
         logging.error(f"AI analysis алдаа: {e}")
         return {
             "needs_support": False, 
-            "problem_description": user_message[:100] + "..." if len(user_message) > 100 else user_message,
+            "problem_description": user_message[:50] + "..." if len(user_message) > 50 else user_message,
+            "core_problem": user_message[:50] + "..." if len(user_message) > 50 else user_message,
             "matching_services": [], 
-            "confidence": 0
+            "confidence": 0,
+            "is_critical": False
         }
 
 def suggest_services_from_analysis(matching_services: list):
@@ -470,7 +549,7 @@ def mark_conversation_resolved(conv_id: int):
     
     try:
         resp = requests.post(api_url, json=payload, headers=headers, timeout=10)
-        resp.raise_for_status()
+    resp.raise_for_status()
         return True
     except Exception as e:
         logging.error(f"Failed to mark conversation as resolved: {e}")
@@ -524,7 +603,7 @@ def send_to_teams(message: str, title: str = "Cloud.mn AI Assistant", color: str
         return False
 
 def send_teams_notification(conv_id: int, message: str, message_type: str = "outgoing", is_unsolved: bool = False, confirmed: bool = False, user_email: str = None, original_question: str = ""):
-    """Send notification to Teams about new conversation or message"""
+    """Send notification to Teams about core problems only (confirmed critical issues)"""
     if not TEAMS_WEBHOOK_URL:
         return
         
@@ -538,60 +617,71 @@ def send_teams_notification(conv_id: int, message: str, message_type: str = "out
         contact_name = contact.get("name", "Хэрэглэгч")
         contact_email = contact.get("email", "Имэйл олдсонгүй")
         
-        # Only send to Teams if confirmed
-        if confirmed:
+        # Only send to Teams if confirmed and there's a specific problem
+        if confirmed and user_email:
             # Get email from conversation or use contact email as fallback
             display_email = user_email if user_email else contact_email
             
-            # Use AI to analyze and describe the problem for support team
-            problem_description = ""
-            if original_question:
+            # Analyze the entire conversation to identify the core issue
+            conversation_history = conversation_memory.get(conv_id, [])
+            user_messages = []
+            for msg in conversation_history:
+                if msg.get("role") == "user":
+                    user_messages.append(msg.get("content", ""))
+            
+            # Get core problem using AI analysis
+            core_problem = ""
+            if original_question and client:
                 try:
-                    # Analyze the original question to get a clear problem description
+                    # Use the full conversation context to get precise problem description
+                    full_context = "\n".join(user_messages) if user_messages else original_question
+                    
                     problem_analysis = client.chat.completions.create(
                         model="gpt-4",
                         messages=[
                             {
                                 "role": "system",
-                                "content": "Та хэрэглэгчийн асуудлыг товч, тодорхой тайлбарлаж өгөх мэргэжилтэн. Дэмжлэгийн багт ойлгомжтой байх ёстой."
+                                "content": "Та хэрэглэгчийн асуудлыг цэгцтэй тодорхойлж өгөх мэргэжилтэн. Дэмжлэгийн багт ойлгомжтой, үйлдэлд чиглэсэн тайлбар өг."
                             },
                             {
                                 "role": "user",
-                                "content": f"Хэрэглэгчийн асуулт: '{original_question}'\n\nЭнэ асуудлыг дэмжлэгийн багт товч, тодорхой тайлбарлаж өгнө үү (1-2 өгүүлбэрээр):"
+                                "content": f"Хэрэглэгчийн бүх харилцлага: '{full_context}'\n\nЭнэ хэрэглэгчийн ХАМГИЙН ЧУХАЛ асуудлыг 1 өгүүлбэрээр тодорхой тайлбарлаж, дэмжлэгийн багт хэрхэн шийдвэрлэх талаар мэдээлэл өг:"
                             }
                         ],
-                        max_tokens=150,
-                        temperature=0.3
+                        max_tokens=100,
+                        temperature=0.2
                     )
-                    problem_description = problem_analysis.choices[0].message.content.strip()
+                    core_problem = problem_analysis.choices[0].message.content.strip()
                 except Exception as e:
-                    logging.error(f"Problem analysis failed: {e}")
-                    problem_description = original_question
+                    logging.error(f"Core problem analysis failed: {e}")
+                    core_problem = original_question[:100] + "..." if len(original_question) > 100 else original_question
             else:
-                problem_description = message
+                core_problem = original_question[:100] + "..." if len(original_question) > 100 else original_question
             
-            # Create Teams message with simpler format
+            # Create focused Teams message with only essential information
             teams_message = f"""
-Cloud.mn AI - {contact_name}
-{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+🚨 ЧУХАЛ АСУУДАЛ - Cloud.mn
 
-💬 Шинэ мессэж
+👤 Хэрэглэгч: {contact_name}
+📧 Имэйл: {display_email}
+🆔 Conversation ID: {conv_id}
 
-Хэрэглэгч:
-Нэр: {contact_name}
-Имэйл: {display_email}
-Харилцан ярианы ID: {conv_id}
+⚠️ **Асуудал:**
+{core_problem}
 
-Асуудал: {problem_description}
+🕒 Огноо: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+🔗 Chatwoot: {CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conv_id}
             """
             
-            # Send to Teams with HTML format
+            # Send to Teams with critical color (red/orange)
             send_to_teams(
                 message=teams_message,
-                title=f"Cloud.mn AI - {contact_name}",
-                color="0076D7",  # Default blue color
-                conv_id=conv_id  # Pass conv_id for Chatwoot URL
+                title=f"🚨 ЧУХАЛ - {contact_name}",
+                color="FF6B35",  # Orange/red color for critical issues
+                conv_id=conv_id
             )
+            
+            logging.info(f"Critical issue sent to Teams for conversation {conv_id}")
         
     except Exception as e:
         logging.error(f"Failed to send Teams notification: {e}")
@@ -658,7 +748,6 @@ def chatwoot_webhook():
         if crawl_status["status"] == "completed":
             response = f"✅ Сайт аль хэдийн шүүрдэгдсэн байна! {crawl_status.get('pages_count', 0)} хуудас бэлэн.\n\n'search <асуулт>' командаар хайлт хийж болно!"
             send_to_chatwoot(conv_id, response)
-            send_teams_notification(conv_id, f"Сайт шүүрдэгдсэн байна. {crawl_status.get('pages_count', 0)} хуудас бэлэн.", "outgoing")
         elif crawl_status["status"] == "running":
             send_to_chatwoot(conv_id, "🔄 Сайт одоо шүүрдэгдэж байна. Түр хүлээнэ үү...")
         else:
@@ -670,7 +759,6 @@ def chatwoot_webhook():
             if not crawled_data:
                 crawl_status = {"status": "failed", "message": "Manual crawl failed"}
                 send_to_chatwoot(conv_id, "❌ Шүүрдэх явцад алдаа гарлаа. Дахин оролдоно уу.")
-                send_teams_notification(conv_id, "❌ Сайт шүүрдэхэд алдаа гарлаа", "outgoing")
             else:
                 crawl_status = {
                     "status": "completed", 
@@ -681,7 +769,6 @@ def chatwoot_webhook():
                 lines = [f"📄 {p['title']} — {p['url']}" for p in crawled_data[:3]]
                 response = f"✅ {len(crawled_data)} хуудас амжилттай шүүрдлээ!\n\nЭхний 3 хуудас:\n" + "\n".join(lines) + f"\n\nОдоо 'search <асуулт>' командаар хайлт хийж болно!"
                 send_to_chatwoot(conv_id, response)
-                send_teams_notification(conv_id, f"✅ {len(crawled_data)} хуудас амжилттай шүүрдлээ!", "outgoing")
 
     elif text.lower().startswith("scrape"):
         parts = text.split(maxsplit=1)
@@ -697,11 +784,9 @@ def chatwoot_webhook():
                 
                 response = f"📄 **{page['title']}**\n\n📝 **Товчилсон агуулга:**\n{summary}\n\n🔗 {url}"
                 send_to_chatwoot(conv_id, response)
-                send_teams_notification(conv_id, f"📄 {page['title']} хуудсыг шүүрдлээ", "outgoing")
             except Exception as e:
                 error_msg = f"❌ {url} хаягыг шүүрдэхэд алдаа гарлаа: {e}"
                 send_to_chatwoot(conv_id, error_msg)
-                send_teams_notification(conv_id, error_msg, "outgoing")
 
     elif text.lower().startswith("search"):
         parts = text.split(maxsplit=1)
@@ -727,11 +812,9 @@ def chatwoot_webhook():
                         response += f"   🔗 {result['url']}\n\n"
                     
                     send_to_chatwoot(conv_id, response)
-                    send_teams_notification(conv_id, f"🔍 '{query}' хайлтын үр дүн: {len(results)} илэрц олдлоо", "outgoing")
                 else:
                     response = f"❌ '{query}' хайлтаар илэрц олдсонгүй."
                     send_to_chatwoot(conv_id, response)
-                    send_teams_notification(conv_id, response, "outgoing")
 
     elif text.lower() in ["help", "тусламж"]:
         # Show status-aware help
@@ -761,12 +844,10 @@ def chatwoot_webhook():
 ⏰ Үргэлж тусламжид бэлэн байна!
         """
         send_to_chatwoot(conv_id, help_text)
-        send_teams_notification(conv_id, f"ℹ️ {contact_name} тусламж хүссэн", "outgoing")
 
     elif text.lower() in ["баяртай", "goodbye", "баай"]:
         response = f"👋 Баяртай {contact_name}! Дараа уулзацгаая!"
         send_to_chatwoot(conv_id, response)
-        send_teams_notification(conv_id, response, "outgoing")
         mark_conversation_resolved(conv_id)
 
     else:
@@ -874,14 +955,17 @@ def chatwoot_webhook():
             # Дэмжлэгийн багтай холбогдох шаардлагатай эсэхийг шалгах
             needs_support = analysis.get("needs_support", False)
             confidence = analysis.get("confidence", 0)
+            is_critical = analysis.get("is_critical", False)
             
-            if needs_support and confidence > 60:
-                # Өндөр итгэлтэйгээр дэмжлэг хэрэгтэй гэж үзэж байвал
+            # Зөвхөн чухал асуудлыг Teams рүү илгээх
+            if needs_support and is_critical and confidence > 50:
+                # Өндөр итгэлтэй + чухал асуудал гэж үзэж байвал
                 confirmation_message = f"""
-❓ Таны асуудлыг шийдвэрлэхэд мэргэжлийн дэмжлэг шаардлагатай байх магадлалтай. Дэмжлэгийн баг руу илгээх үү?
+❓ Таны тулгарч байгаа асуудлыг шийдвэрлэхэд мэргэжлийн дэмжлэг шаардлагатай байна. Дэмжлэгийн баг руу илгээх үү?
 
-🔍 **Дүгнэлт:** {analysis.get('problem_description', 'Техникийн асуудлын товч тайлбар')}
-📊 **Итгэлийн түвшин:** {confidence}%
+🔍 **Асуудал:** {analysis.get('core_problem', 'Техникийн асуудлын товч тайлбар')}
+📊 **Чухал байдал:** {'Өндөр' if is_critical else 'Дунд'}
+🎯 **Итгэлийн түвшин:** {confidence}%
 
 Зөвшөөрч байвал "тийм" эсвэл "зөвшөөрч байна" гэж бичнэ үү.
 Зөвшөөрөхгүй бол "үгүй" эсвэл "зөвшөөрөхгүй" гэж бичнэ үү.
@@ -907,8 +991,8 @@ def chatwoot_webhook():
                 """
                 send_to_chatwoot(conv_id, clarification_message)
             
-            # Шаардлагагүй бол Teams рүү илгээхгүй
-            # Зөвхөн үндсэн AI хариулт л хангалттай
+            # Зөвхөн чухал асуудлын хувьд Teams notification-г зөвшөөрснөөр илгээнэ
+            # Бусад ерөнхий асуултуудад Teams илгээхгүй
 
     # Үйлчилгээний үнэ харуулах
     services = get_services_in_text(text)
@@ -960,7 +1044,7 @@ def force_crawl():
                 "pages_crawled": len(crawled_data),
                 "crawl_status": crawl_status
             })
-        else:
+    else:
             crawl_status = {"status": "failed", "message": "Force crawl failed - no pages found"}
             return jsonify({"error": "No pages were crawled"}), 500
             
