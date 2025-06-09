@@ -130,21 +130,24 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
             relevant_pages.append(f"Хуудас: {page['title']}\nАгуулга: {page['body'][:300]}...")
         context = "\n\n".join(relevant_pages)
     
+    # Build system message with context
+    system_content = """Та Cloud.mn-ийн баримт бичгийн талаар асуултад хариулдаг Монгол AI туслах юм. 
+    Хэрэглэгчтэй монгол хэлээр ярилцаарай. Хариултаа товч бөгөөд ойлгомжтой байлгаарай.
+    
+    Боломжит командууд:
+    - crawl: Бүх сайтыг шүүрдэх
+    - scrape <URL>: Тодорхой хуудсыг шүүрдэх  
+    - help: Тусламж харуулах
+    - search <асуулт>: Мэдээлэл хайх"""
+    
+    if context:
+        system_content += f"\n\nКонтекст мэдээлэл:\n{context}"
+    
     # Build conversation context
     messages = [
         {
             "role": "system", 
-            "content": f"""Та Cloud.mn-ийн баримт бичгийн талаар асуултад хариулдаг Монгол AI туслах юм. 
-            Хэрэглэгчтэй монгол хэлээр ярилцаарай. Хариултаа товч бөгөөд ойлгомжтой байлгаарай.
-            
-            Боломжит командууд:
-            - crawl: Бүх сайтыг шүүрдэх
-            - scrape <URL>: Тодорхой хуудсыг шүүрдэх  
-            - help: Тусламж харуулах
-            - search <асуулт>: Мэдээлэл хайх
-            
-            {f"Контекст мэдээлэл:\\n{context}" if context else ""}
-            """
+            "content": system_content
         }
     ]
     
