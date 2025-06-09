@@ -9,20 +9,14 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
-# CloudMN documentation crawler болон vector search-ийн dependencies
-from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
-import json
-from typing import Dict, List, Set, Tuple, Optional
-import numpy as np
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain.schema import Document
-import tiktoken
-import threading
+from bs4 import BeautifulSoup
+import logging
 
 app = Flask(__name__)
+
+# Logging тохиргоо
+logging.basicConfig(level=logging.INFO)
 
 # Орчны хувьсагчид
 OPENAI_API_KEY    = os.environ["OPENAI_API_KEY"]
@@ -45,338 +39,92 @@ MAX_AI_RETRIES = 2  # AI хэдэн удаа оролдсоны дараа аж�
 JWT_SECRET = os.environ.get("JWT_SECRET", "your-secret-key-here")
 VERIFICATION_URL_BASE = os.environ.get("VERIFICATION_URL_BASE", "http://localhost:5000")
 
-# CloudMN documentation тохиргоо
-CLOUDMN_DOCS_BASE = "https://docs.cloud.mn/"
-CRAWL_DELAY = 0.5  # Секундээр хэлбэрээр серверт ачаалал багасгах (1-ээс 0.5 болгох)
-MAX_CRAWL_PAGES = 50  # Максимум хэдэн хуудас авах
-VECTOR_SIMILARITY_THRESHOLD = 0.75  # Vector similarity хязгаар (0-1)
-MAX_VECTOR_RESULTS = 3  # Хамгийн их хэдэн үр дүн буцаах
+# Scraping тохиргоо
+ROOT_URL = "https://docs.cloud.mn/"
+DELAY_SEC = 0.5
+ALLOWED_NETLOC = urlparse(ROOT_URL).netloc
 
 # OpenAI клиент
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# CloudMN документацийн кэш хадгалах
-cloudmn_docs_cache = {}
-last_crawl_time = None
-vector_store = None
-last_vector_store_update = None
+# —— Scraping функцууд —— #
+def extract_content(soup: BeautifulSoup, base_url: str):
+    main = soup.find("main") or soup
+    texts = []
+    images = []
 
-class CloudMNDocsCrawler:
-    """CloudMN documentation сайтыг crawl хийх класс"""
-    
-    def __init__(self, base_url: str = CLOUDMN_DOCS_BASE):
-        self.base_url = base_url
-        self.visited_urls: Set[str] = set()
-        self.docs_content: Dict[str, Dict] = {}
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'CloudMN-ChatBot-Crawler/1.0 (Educational Purpose)'
+    # Текст
+    for tag in main.find_all(["h1", "h2", "h3", "h4", "p", "li", "code"]):
+        texts.append(tag.get_text(strip=True))
+
+    # Зураг
+    for img in main.find_all("img"):
+        src = img.get("src")
+        alt = img.get("alt", "")
+        if src:
+            full_img_url = urljoin(base_url, src)
+            image_line = f"[Image] {alt.strip()} — {full_img_url}" if alt else f"[Image] {full_img_url}"
+            texts.append(image_line)
+            images.append({"url": full_img_url, "alt": alt})
+
+    return "\n\n".join(texts), images
+
+
+def is_internal_link(href: str) -> bool:
+    if not href:
+        return False
+    parsed = urlparse(href)
+    if not parsed.netloc:
+        return True
+    return parsed.netloc == ALLOWED_NETLOC
+
+
+def normalize_url(base: str, link: str) -> str:
+    return urljoin(base, link.split("#")[0])
+
+
+def crawl_and_scrape(start_url: str):
+    visited = set()
+    to_visit = {start_url}
+    results = []
+
+    while to_visit:
+        url = to_visit.pop()
+        if url in visited:
+            continue
+        visited.add(url)
+        
+        try:
+            logging.info(f"[Crawling] {url}")
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+        except Exception as e:
+            logging.warning(f"Failed to fetch {url}: {e}")
+            continue
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        title = soup.title.string.strip() if soup.title else url
+        body, images = extract_content(soup, url)
+
+        results.append({
+            "url": url,
+            "title": title,
+            "body": body,
+            "images": images
         })
-    
-    def is_valid_docs_url(self, url: str) -> bool:
-        """URL нь CloudMN docs сайтын хэсэг мөн эсэхийг шалгах"""
-        parsed = urlparse(url)
-        return parsed.netloc == 'docs.cloud.mn' and not url.endswith(('.pdf', '.jpg', '.png', '.gif'))
-    
-    def extract_page_content(self, url: str) -> Dict:
-        """Тухайн хуудасны контентыг задлан авах"""
-        try:
-            print(f"🔍 Хуудас задлаж байна: {url}")
-            
-            response = self.session.get(url, timeout=10)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Гарчиг авах
-            title = ""
-            title_tag = soup.find('title')
-            if title_tag:
-                title = title_tag.get_text().strip()
-            
-            # Үндсэн контент авах (docs сайтын хэсгээс)
-            content = ""
-            
-            # Янз бүрийн selector-ууд туршиж үзэх
-            content_selectors = [
-                'main', 'article', '.content', '#content', 
-                '.markdown', '.docs-content', '.main-content'
-            ]
-            
-            for selector in content_selectors:
-                content_elem = soup.select_one(selector)
-                if content_elem:
-                    content = content_elem.get_text(separator='\n', strip=True)
-                    break
-            
-            # Хэрэв тодорхой content олдоогүй бол body дотроос авах
-            if not content:
-                body = soup.find('body')
-                if body:
-                    # Script, style гэх мэт шаардлагагүй элементүүдийг арилгах
-                    for script in body(["script", "style", "nav", "footer", "header"]):
-                        script.decompose()
-                    content = body.get_text(separator='\n', strip=True)
-            
-            # Навигацийн линкүүд олох
-            links = []
-            for link in soup.find_all('a', href=True):
-                href = link['href']
-                absolute_url = urljoin(url, href)
-                if self.is_valid_docs_url(absolute_url):
-                    links.append(absolute_url)
-            
-            return {
-                'url': url,
-                'title': title,
-                'content': content[:5000],  # Хэт урт контентыг хязгаарлах
-                'links': list(set(links)),  # Давхцсан линкүүдийг арилгах
-                'crawled_at': datetime.now().isoformat()
-            }
-            
-        except Exception as e:
-            print(f"❌ {url} хуудас задлахад алдаа: {e}")
-            return None
-    
-    def crawl_docs(self, max_pages: int = MAX_CRAWL_PAGES) -> Dict[str, Dict]:
-        """CloudMN docs сайтыг crawl хийх"""
-        try:
-            print(f"🚀 CloudMN docs crawling эхэлж байна... (max: {max_pages} хуудас)")
-            
-            # Эхлэх URL-ууд
-            start_urls = [
-                self.base_url,
-                urljoin(self.base_url, '/docs/'),
-                urljoin(self.base_url, '/getting-started/'),
-            ]
-            
-            urls_to_visit = list(start_urls)
-            pages_crawled = 0
-            
-            while urls_to_visit and pages_crawled < max_pages:
-                current_url = urls_to_visit.pop(0)
-                
-                # Аль хэдийн зочилсон URL эсэхийг шалгах
-                if current_url in self.visited_urls:
-                    continue
-                
-                self.visited_urls.add(current_url)
-                
-                # Хуудасны контентыг авах
-                page_data = self.extract_page_content(current_url)
-                
-                if page_data and page_data['content'].strip():
-                    self.docs_content[current_url] = page_data
-                    pages_crawled += 1
-                    
-                    print(f"✅ [{pages_crawled}/{max_pages}] {current_url}")
-                    
-                    # Шинэ линкүүдийг нэмэх
-                    for link in page_data.get('links', []):
-                        if link not in self.visited_urls and link not in urls_to_visit:
-                            urls_to_visit.append(link)
-                
-                # Сервертэй зөрүүлэхгүйн тулд түр зогсох
-                time.sleep(CRAWL_DELAY)
-            
-            print(f"🎉 Crawling дууслаа! Нийт {len(self.docs_content)} хуудас цуглуулав")
-            return self.docs_content
-            
-        except Exception as e:
-            print(f"❌ Crawling алдаа: {e}")
-            return {}
 
-def get_cloudmn_docs_content() -> Dict[str, Dict]:
-    """CloudMN документацийн контентыг авах (cache-тэй)"""
-    global cloudmn_docs_cache, last_crawl_time
-    
-    # Хэрэв cache байхгүй бол шууд хоосон dict буцаах (background-д crawl хийх)
-    if not cloudmn_docs_cache:
-        print("⚠️ CloudMN docs cache хоосон - background crawling эхлүүлэх...")
-        # Background-д crawling эхлүүлэх (blocking биш)
-        start_background_crawling()
-        return {}  # Хоосон cache буцаах
-    
-    # 4 цагийн дараа background-д дахин crawl хийх
-    now = datetime.now()
-    if (last_crawl_time is not None and 
-        (now - last_crawl_time).total_seconds() > 14400):  # 4 цаг
-        print("🔄 CloudMN docs background refresh...")
-        start_background_crawling()
-    
-    return cloudmn_docs_cache
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if is_internal_link(href):
+                full = normalize_url(url, href)
+                if full.startswith(ROOT_URL) and full not in visited:
+                    to_visit.add(full)
 
-def start_background_crawling():
-    """Background thread-д CloudMN crawling эхлүүлэх"""
-    def background_crawl():
-        global cloudmn_docs_cache, last_crawl_time
-        try:
-            print("🚀 Background CloudMN crawling эхэлж байна...")
-            crawler = CloudMNDocsCrawler()
-            # Цөөн хуудас crawl хийх (хурдан болгох)
-            new_cache = crawler.crawl_docs(max_pages=20)  # 50-аас 20 болгох
-            
-            if new_cache:
-                cloudmn_docs_cache = new_cache
-                last_crawl_time = datetime.now()
-                print(f"✅ Background crawling дууслаа ({len(new_cache)} хуудас)")
-                
-                # NOTE: Vector store-ийг initialize_system()-д үүсгэдэг тул энд дахин үүсгэхгүй
-                
-            else:
-                print("❌ Background crawling хоосон үр дүн")
-                
-        except Exception as e:
-            print(f"❌ Background crawling алдаа: {e}")
-    
-    # Background thread эхлүүлэх
-    thread = threading.Thread(target=background_crawl, daemon=True)
-    thread.start()
-    print("🔄 Background crawling thread эхлэлээ")
+        time.sleep(DELAY_SEC)
 
-def create_vector_store() -> FAISS:
-    """CloudMN документацийг vector store үүсгэх"""
-    global vector_store, last_vector_store_update
-    
-    try:
-        # Only-once guard: Хэрэв аль хэдийн үүссэн бол буцаах
-        if vector_store is not None:
-            print("✅ Vector store аль хэдийн үүссэн байна")
-            return vector_store
-        
-        print("🔄 Vector store үүсгэж байна...")
-        
-        # Документацийн контентыг авах
-        docs_content = get_cloudmn_docs_content()
-        
-        if not docs_content:
-            print("❌ Документацийн контент хоосон байна (Background crawling явагдаж байна)")
-            return None  # Background-д crawling явагдаж байгаа тул None буцаах
-        
-        # Документуудыг бэлтгэх
-        documents = []
-        for url, page_data in docs_content.items():
-            title = page_data.get('title', '')
-            content = page_data.get('content', '')
-            
-            if not content.strip():
-                continue
-            
-            # Документуудыг жижиг хэсгүүд болгон хуваах
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
-                chunk_overlap=200,
-                length_function=len,
-                separators=["\n\n", "\n", " ", ""]
-            )
-            
-            chunks = text_splitter.split_text(content)
-            
-            for i, chunk in enumerate(chunks):
-                # Мета мэдээлэлтэй Document үүсгэх
-                doc = Document(
-                    page_content=chunk,
-                    metadata={
-                        "source": url,
-                        "title": title,
-                        "chunk_index": i,
-                        "total_chunks": len(chunks)
-                    }
-                )
-                documents.append(doc)
-        
-        if not documents:
-            print("❌ Документ бэлтгэх боломжгүй")
-            return None
-        
-        print(f"✅ {len(documents)} документ бэлтгэлээ")
-        
-        # Embeddings үүсгэх
-        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
-        
-        # Vector store үүсгэх ба global variable-д хадгалах
-        vector_store = FAISS.from_documents(documents, embeddings)
-        last_vector_store_update = datetime.now()
-        
-        print(f"✅ Vector store үүсгэлээ ({len(documents)} документ)")
-        
-        return vector_store
-        
-    except Exception as e:
-        print(f"❌ Vector store үүсгэхэд алдаа: {e}")
-        return None
+    return results
 
-def search_cloudmn_docs_vector(query: str, max_results: int = MAX_VECTOR_RESULTS) -> List[Dict]:
-    """Vector similarity search ашиглан CloudMN документацаас хайлт хийх"""
-    global vector_store
-    
-    # Global vector store шууд ашиглах
-    if vector_store is None:
-        print("❌ Vector store бэлэн биш байна!")
-        return []
-    
-    try:
-        # Хайлт хийх
-        docs_and_scores = vector_store.similarity_search_with_score(query, k=max_results)
-        
-        results = []
-        for doc, score in docs_and_scores:
-            # Score-г 0-1 хүрээнд хөрвүүлэх
-            similarity_score = 1.0 - score  # FAISS-ийн distance-ийг similarity болгох
-            
-            # Хэрэв similarity хязгаараас бага бол алгасах
-            if similarity_score < VECTOR_SIMILARITY_THRESHOLD:
-                continue
-            
-            # Үр дүнг бэлтгэх
-            result = {
-                'url': doc.metadata.get('source', ''),
-                'title': doc.metadata.get('title', ''),
-                'content_excerpt': doc.page_content,
-                'similarity_score': similarity_score,
-                'chunk_index': doc.metadata.get('chunk_index', 0),
-                'total_chunks': doc.metadata.get('total_chunks', 0)
-            }
-            
-            results.append(result)
-        
-        return results
-        
-    except Exception as e:
-        print(f"❌ Vector search алдаа: {e}")
-        return []  # Алдаа гарсан ч хоосон list буцаах
-
-def enhance_ai_response_with_cloudmn_docs(message_content: str) -> str:
-    """Хэрэглэгчийн асуултанд CloudMN документацийн мэдээллийг нэмж өгөх (vector search)"""
-    try:
-        print(f"🔍 CloudMN документацаас хайлт хийж байна: {message_content[:50]}...")
-        
-        # Vector search хийх
-        search_results = search_cloudmn_docs_vector(message_content)
-        
-        if not search_results:
-            print("❌ Хайлтад тохирох үр дүн олдсонгүй (cache хоосон эсвэл холбоотой контент байхгүй)")
-            return ""  # Хоосон string буцаах, алдаа гаргахгүй
-        
-        print(f"✅ {len(search_results)} үр дүн олдлоо")
-        
-        # AI-д өгөх нэмэлт контекст бэлтгэх
-        docs_context = "\n\nCloudMN документацаас олдсон холбогдох мэдээлэл:\n"
-        
-        for i, result in enumerate(search_results, 1):
-            similarity_percent = int(result['similarity_score'] * 100)
-            docs_context += f"\n{i}. {result['title']} (Холбоотой байдал: {similarity_percent}%)\n"
-            docs_context += f"   URL: {result['url']}\n"
-            docs_context += f"   Контент: {result['content_excerpt']}\n"
-        
-        docs_context += "\nЭнэ мэдээллийг ашиглаж хэрэглэгчийн асуултанд хариулна уу."
-        
-        return docs_context
-        
-    except Exception as e:
-        print(f"❌ CloudMN docs нэмэхэд алдаа: {e}")
-        return ""  # Алдаа гарсан ч хоосон string буцааж, system-ийг зогсоохгүй
-
+# —— Гол функцууд —— #
 def is_valid_email(email):
     """Имэйл хаягийн форматыг шалгах"""
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
@@ -582,7 +330,6 @@ def analyze_customer_issue(thread_id, current_message, customer_email=None):
             "Тухайн асуудлыг чадахаар байвал өөрийн мэдлэгийн хүрээнд шийдвэрлэж өгнө үү. "
             "Хэрэглэгчийн бүх чат түүхийг харж, асуудлыг иж бүрэн дүгнэж өгнө үү. "
             "Хэрэв олон асуудал байвал гол асуудлыг тодорхойлж фокуслана уу."
-            "Монголоор хариулна."
         )
 
         # Comprehensive user prompt
@@ -594,7 +341,7 @@ def analyze_customer_issue(thread_id, current_message, customer_email=None):
 
 Дараах форматаар бүх чат түүхэд тулгуурлан дүгнэлт өгнө үү:
 
-АСУУДЛЫН ТӨРӨЛ: [Техникийн/Мэдээллийн/Гомдол]
+АСУУДЛЫН ТӨРӨЛ: [Техникийн/Худалдааны/Мэдээллийн/Гомдол]
 ЯАРАЛТАЙ БАЙДАЛ: [Өндөр/Дунд/Бага] 
 АСУУДЛЫН ТОВЧ ТАЙЛБАР: [Гол асуудлыг 1-2 өгүүлбэрээр]
 ЧАТЫН ХЭВ МАЯГ: [Анхны асуулт/Дагалдах асуулт/Гомдол/Тодруулга хүсэх]
@@ -715,22 +462,13 @@ def send_teams_notification(conv_id, customer_message, customer_email=None, esca
         return False
 
 def get_ai_response(thread_id, message_content, conv_id=None, customer_email=None, retry_count=0):
-    """OpenAI Assistant-ээс хариулт авах (CloudMN docs integration-тэй)"""
+    """OpenAI Assistant-ээс хариулт авах"""
     try:
-        # CloudMN документацийн нэмэлт мэдээлэл авах
-        cloudmn_context = enhance_ai_response_with_cloudmn_docs(message_content)
-        
-        # Хэрэв CloudMN холбоотой мэдээлэл олдвол үүнийг мессежид нэмэх
-        enhanced_message = message_content
-        if cloudmn_context:
-            enhanced_message = message_content + cloudmn_context
-            print(f"📚 CloudMN docs контекст нэмэгдлээ ({len(cloudmn_context)} тэмдэгт)")
-
         # Хэрэглэгчийн мессежийг thread руу нэмэх
         client.beta.threads.messages.create(
             thread_id=thread_id,
             role="user",
-            content=enhanced_message
+            content=message_content
         )
 
         # Assistant run үүсгэх
@@ -783,7 +521,7 @@ def get_ai_response(thread_id, message_content, conv_id=None, customer_email=Non
             
             return timeout_msg
 
-        # Assistant-ийн хариултыг авах
+        # Assistant-ийн хариультыг авах
         messages = client.beta.threads.messages.list(thread_id=thread_id)
         
         for msg in messages.data:
@@ -1261,101 +999,35 @@ def clean_ai_response(response_text):
         print(f"❌ AI хариулт цэвэрлэхэд алдаа: {e}")
         return response_text.strip()
 
-def initialize_system():
-    """Application эхлэх үед бүх системийг урьдчилж бэлдэх"""
-    print("🚀 CloudMN Documentation System-ийг бэлдэж байна...")
-    
-    # 1) Crawl synchronously болон өгөгдөл цуглуулах
-    print("📚 1. CloudMN docs crawling эхлүүлж байна...")
-    start_background_crawling()
-    
-    # 2) Тухайн crawling дууссаных хүлээж vector store үүсгэх
-    print("🎯 2. Vector store-ийг startup үед үүсгэж байна...")
-    
-    # Background thread дуустал хүлээх (максимум 60 секунд)
-    import time
-    wait_count = 0
-    max_wait = 60  # 60 секунд
-    
-    while not cloudmn_docs_cache and wait_count < max_wait:
-        print(f"⏳ Crawling дуусахыг хүлээж байна... ({wait_count + 1}/{max_wait})")
-        time.sleep(1)
-        wait_count += 1
-    
-    # Vector store үүсгэх
-    vs = create_vector_store()
-    if vs:
-        print("✅ Vector store амжилттай үүсгэлээ startup үед")
-    else:
-        print("❌ Vector store үүсгэхэд алдаа гарлаа - background процессоор үргэлжлэх")
-    
-    print("🎯 CloudMN Documentation System бэлэн болов.")
-    print("💡 Хэрэглэгчдийн асуултууд одоо хурдан боловсрогдоно.")
-
-@app.route("/system-status", methods=["GET"])
-def system_status():
-    """CloudMN Documentation System-ийн бүрэн статус"""
-    global cloudmn_docs_cache, last_crawl_time, vector_store, last_vector_store_update
-    
-    current_time = datetime.now()
-    
-    # Crawling статус
-    crawling_status = {
-        "cache_loaded": bool(cloudmn_docs_cache),
-        "pages_cached": len(cloudmn_docs_cache) if cloudmn_docs_cache else 0,
-        "last_crawl_time": last_crawl_time.isoformat() if last_crawl_time else None,
-        "cache_age_hours": (current_time - last_crawl_time).total_seconds() / 3600 if last_crawl_time else None
-    }
-    
-    # Vector store статус
-    vector_status = {
-        "vector_store_loaded": vector_store is not None,
-        "last_update_time": last_vector_store_update.isoformat() if last_vector_store_update else None,
-        "update_age_hours": (current_time - last_vector_store_update).total_seconds() / 3600 if last_vector_store_update else None
-    }
-    
-    # Ерөнхий ready байдал
-    system_ready = bool(cloudmn_docs_cache) and (vector_store is not None)
-    
-    return jsonify({
-        "system_ready": system_ready,
-        "ready_percentage": (
-            (50 if cloudmn_docs_cache else 0) + 
-            (50 if vector_store is not None else 0)
-        ),
-        "crawling": crawling_status,
-        "vector_store": vector_status,
-        "message": (
-            "✅ Систем бэлэн байна" if system_ready 
-            else "🔄 Систем бэлдэгдэж байна... Түр хүлээнэ үү"
-        )
-    }), 200
-
-@app.route("/refresh-system", methods=["POST"])
-def refresh_system():
-    """CloudMN Documentation System-ийг дахин бэлдэх (Admin endpoint)"""
+# —— API Endpoints —— #
+@app.route("/api/scrape", methods=["POST"])
+def scrape():
+    data = request.get_json(force=True)
+    url = data.get("url")
+    if not url:
+        return jsonify({"error": "Missing 'url' in JSON body"}), 400
     try:
-        print("🔄 Manual system refresh хүсэлт ирлээ...")
-        
-        # Background refresh эхлүүлэх
-        start_background_crawling()
-        
-        return jsonify({
-            "status": "success",
-            "message": "🔄 CloudMN Documentation System refresh эхлүүлэв. /system-status endpoint-оор прогрессийг шалгана уу.",
-            "estimated_time": "2-3 минут"
-        }), 200
-        
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
     except Exception as e:
-        return jsonify({
-            "status": "error", 
-            "message": f"System refresh алдаа: {str(e)}"
-        }), 500
+        return jsonify({"error": f"Fetch failed: {e}"}), 502
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    title = soup.title.string.strip() if soup.title else url
+    body, images = extract_content(soup, url)
+
+    return jsonify({
+        "url": url,
+        "title": title,
+        "body": body,
+        "images": images
+    })
+
+
+@app.route("/api/crawl", methods=["POST"])
+def crawl():
+    pages = crawl_and_scrape(ROOT_URL)
+    return jsonify(pages)
 
 if __name__ == "__main__":
-    # Application эхлэх үед background crawling эхлүүлэх
-    print("🚀 Flask application эхэлж байна...")
-    print("🔄 Анхны CloudMN docs crawling background-д эхлүүлж байна...")
-    initialize_system()
-    
-    app.run(debug=True, port=5000)
+    app.run(host="0.0.0.0", port=5000, debug=True)

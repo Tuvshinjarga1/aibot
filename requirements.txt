@@ -11,10 +11,3 @@ langchain-community
 faiss-cpu
 tiktoken
 gunicorn
-# CloudMN documentation crawler болон scraper-ийн нэмэлт packages
-urllib3
-html5lib
-soupsieve
-# Vector search-ийн нэмэлт packages
-numpy>=1.24.0
-scikit-learn>=1.0.0
