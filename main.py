@@ -652,8 +652,44 @@ def chatwoot_webhook():
     text = data.get("content", "").strip()
     contact = data.get("conversation", {}).get("contact", {})
     contact_name = contact.get("name", "Хэрэглэгч")
+    contact_email = contact.get("email", "")
     
     logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
+    
+    # Check if email verification is required (except for verification commands)
+    if not text.lower().startswith(("verify-email", "confirm-email", "help", "тусламж")):
+        if not contact_email:
+            send_to_chatwoot(conv_id, f"""
+👋 Сайн байна уу {contact_name}!
+
+📧 Миний тусламжийг ашиглахын тулд эхлээд имэйл хаягаа баталгаажуулах шаардлагатай.
+
+Дараах алхмуудыг дагана уу:
+1️⃣ `verify-email <таны_имэйл_хаяг>` команд өгнө үү
+2️⃣ Имэйл дээрээ ирсэн 6 оронтой кодыг `confirm-email <код>` командаар оруулна уу
+
+Жишээ:
+• verify-email user@example.com  
+• confirm-email 123456
+
+Тусламж хэрэгтэй бол `help` командыг ашиглана уу.
+            """)
+            return jsonify({"status": "email_required"}), 200
+        elif not is_email_verified(contact_email):
+            send_to_chatwoot(conv_id, f"""
+⚠️ Сайн байна уу {contact_name}!
+
+Таны {contact_email} хаяг хараахан баталгаажаагүй байна.
+
+Хэрэв код аваагүй бол:
+• `verify-email {contact_email}` командыг дахин өгнө үү
+
+Хэрэв код авсан бол:
+• `confirm-email <6_оронтой_код>` командыг ашиглана уу
+
+Тусламж: `help`
+            """)
+            return jsonify({"status": "email_not_verified"}), 200
     
     # Handle different commands
     if text.lower() == "crawl":
@@ -739,15 +775,22 @@ def chatwoot_webhook():
     elif text.lower().startswith("verify-email"):
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            send_to_chatwoot(conv_id, "⚠️ Зөв хэлбэр: `verify-email <имэйл хаяг>`")
+            # Try to use contact email if available
+            if contact_email:
+                email = contact_email
+                send_to_chatwoot(conv_id, f"📧 Chatwoot дээрх {email} хаягийг ашиглан баталгаажуулж байна...")
+            else:
+                send_to_chatwoot(conv_id, "⚠️ Зөв хэлбэр: `verify-email <имэйл хаяг>`\n\nЖишээ: verify-email user@example.com")
+                return jsonify({"status": "success"}), 200
         else:
             email = parts[1].strip()
-            result = send_email_verification_request(email)
-            
-            if result["success"]:
-                send_to_chatwoot(conv_id, f"✅ {result['message']}\n\nБаталгаажуулалтын кодыг авсны дараа `confirm-email <код>` командыг ашиглана уу.")
-            else:
-                send_to_chatwoot(conv_id, f"❌ {result['message']}")
+        
+        result = send_email_verification_request(email)
+        
+        if result["success"]:
+            send_to_chatwoot(conv_id, f"✅ {result['message']}\n\nБаталгаажуулалтын кодыг авсны дараа `confirm-email <код>` командыг ашиглана уу.")
+        else:
+            send_to_chatwoot(conv_id, f"❌ {result['message']}")
 
     elif text.lower().startswith("confirm-email"):
         parts = text.split(maxsplit=1)
@@ -756,19 +799,24 @@ def chatwoot_webhook():
         else:
             code = parts[1].strip()
             
-            # Get user's email from conversation
-            conv_info = get_conversation_info(conv_id)
-            if not conv_info:
-                send_to_chatwoot(conv_id, "❌ Харилцан ярианы мэдээлэл олдсонгүй.")
-                return jsonify({"status": "error"}), 200
+            # Try to find email in different ways:
+            # 1. From contact info
+            # 2. From any stored verification codes
+            user_email = None
             
-            contact = conv_info.get("contact", {})
-            contact_email = contact.get("email")
+            if contact_email:
+                user_email = contact_email
+            else:
+                # Try to find from verification codes
+                for stored_email in email_verification_codes:
+                    if email_verification_codes[stored_email]['code'] == code:
+                        user_email = stored_email
+                        break
             
-            if not contact_email:
-                send_to_chatwoot(conv_id, "❌ Таны имэйл хаяг олдсонгүй. Эхлээд `verify-email <имэйл хаяг>` командыг ашиглана уу.")
-            elif verify_email_code(contact_email, code):
-                send_to_chatwoot(conv_id, "✅ Имэйл амжилттай баталгаажлаа! Одоо дэмжлэгийн баг руу хүсэлт илгээх боломжтой болсон.")
+            if not user_email:
+                send_to_chatwoot(conv_id, "❌ Имэйл хаяг олдсонгүй. Эхлээд `verify-email <имэйл хаяг>` командыг ашиглана уу.")
+            elif verify_email_code(user_email, code):
+                send_to_chatwoot(conv_id, f"✅ {user_email} хаяг амжилттай баталгаажлаа! Одоо бүх функцийг ашиглах боломжтой болсон.")
             else:
                 send_to_chatwoot(conv_id, "❌ Буруу код эсвэл хугацаа дууссан. Дахин оролдоно уу.")
 
@@ -782,25 +830,45 @@ def chatwoot_webhook():
         elif crawl_status["status"] == "disabled":
             status_info = "⚠️ Автомат шүүрдэх идэвхгүй байна.\n"
         
+        # Check email verification status
+        email_status = ""
+        if contact_email:
+            if is_email_verified(contact_email):
+                email_status = f"✅ Имэйл баталгаажсан: {contact_email}\n"
+            else:
+                email_status = f"⚠️ Имэйл баталгаажаагүй: {contact_email}\n"
+        else:
+            email_status = "❌ Имэйл хаяг бүртгэгдээгүй\n"
+        
         help_text = f"""
 👋 Сайн байна уу {contact_name}! Би Cloud.mn-ийн AI туслах юм.
 
 📊 **Төлөв:**
 {status_info}
 
+📧 **Имэйл баталгаажуулалт:**
+{email_status}
+
 🤖 **Боломжит командууд:**
+
+📧 **Имэйл баталгаажуулалт:**
+• `verify-email <имэйл>` - Имэйл баталгаажуулах код илгээх
+• `confirm-email <код>` - 6 оронтой кодоор баталгаажуулах
+
+🔍 **Мэдээлэл олох** (Имэйл баталгаажсаны дараа):
 • `crawl` - Сайтыг шүүрдэх (шаардлагатай бол)
 • `scrape <URL>` - Тодорхой хуудас шүүрдэх
 • `search <асуулт>` - Мэдээлэл хайх
-• `verify-email <имэйл>` - Имэйл баталгаажуулах
-• `confirm-email <код>` - Баталгаажуулалтын код оруулах
+
+💬 **Чөлөөт ярилцлага** (Имэйл баталгаажсаны дараа):
+Та надад асуулт асууж, ярилцаж болно. Би монгол хэлээр хариулна.
+
+ℹ️ **Бусад:**
 • `help` - Энэ тусламжийг харуулах
+• `баяртай` - Ярилцлага дуусгах
 
-💬 **Чөлөөт ярилцлага:**
-Та мөн надад асуулт асууж, ярилцаж болно. Би монгол хэлээр хариулна.
-
-📧 **Имэйл баталгаажуулалт:**
-Дэмжлэгийн баг руу хүсэлт илгээхийн тулд эхлээд имэйлээ баталгаажуулна уу.
+⚠️ **Анхаарах зүйл:**
+Имэйл баталгаажуулалтын дараа л бүх функцийг ашиглах боломжтой.
 
 ⏰ Үргэлж тусламжид бэлэн байна!
         """
