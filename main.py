@@ -326,6 +326,8 @@ def api_crawl():
 @app.route("/webhook/chatwoot", methods=["POST"])
 def chatwoot_webhook():
     """Enhanced webhook with better AI integration"""
+    global crawled_data, crawl_status  # Move global declaration to the top
+    
     data = request.json or {}
     
     # Only process incoming messages
@@ -353,7 +355,6 @@ def chatwoot_webhook():
         else:
             send_to_chatwoot(conv_id, f"🔄 Сайн байна уу {contact_name}! Сайтыг шүүрдэж байна...")
             
-            global crawled_data, crawl_status
             crawl_status = {"status": "running", "message": f"Manual crawl started by {contact_name}"}
             crawled_data = crawl_and_scrape(ROOT_URL)
             
