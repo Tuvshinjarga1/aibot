@@ -248,18 +248,18 @@ def get_enhanced_ai_response(ai_context: AIContext):
                 if page:
                     image_info = ""
                     if page.get('images'):
-                    image_info = "\nЗургууд:\n" + "\n".join([
-                        f"- {img['alt']}: {img['url']}" if img['alt'] else f"- {img['url']}"
+                        image_info = "\nЗургууд:\n" + "\n".join([
+                            f"- {img['alt']}: {img['url']}" if img['alt'] else f"- {img['url']}"
                             for img in page['images'][:3]  # Limit to 3 images
-                    ])
+                        ])
                 
-                relevant_pages.append(
+                    relevant_pages.append(
                         f"📄 {result['title']}\n"
                         f"🔗 {result['url']}\n"
                         f"📝 {result['snippet']}\n"
                         f"🎯 Нарийвчлал: {result['relevance_score']}/15\n"
-                    f"{image_info}\n"
-                )
+                        f"{image_info}\n"
+                    )
             doc_context = "\n".join(relevant_pages)
     
     # Step 2: Adaptive system prompt based on search results
@@ -286,7 +286,7 @@ def get_enhanced_ai_response(ai_context: AIContext):
 3. Холбогдох линк болон дэмжлэг санал болгох
 4. Техникийн нэр томъёог монгол хэлээр тайлбарлах
 
-f"{'БАРИМТ БИЧГИЙН МЭДЭЭЛЭЛ:\n' + doc_context if doc_context else ''}"
+{'БАРИМТ БИЧГИЙН МЭДЭЭЛЭЛ:\n' + doc_context if doc_context else ''}
     """
     
     # Step 3: Build conversation with smart context management
