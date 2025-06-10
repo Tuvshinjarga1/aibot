@@ -153,110 +153,274 @@ def scrape_single(url: str):
 
 
 # —— AI Assistant Functions —— #
-def get_ai_response(user_message: str, conversation_id: int, context_data: list = None):
-    """Enhanced AI response with better context awareness and image support"""
+
+# AI Context and Decision System
+class AIContext:
+    """Unified AI context management for flexible workflow"""
+    def __init__(self, conv_id: int, user_message: str):
+        self.conv_id = conv_id
+        self.user_message = user_message
+        self.conversation_history = conversation_memory.get(conv_id, [])
+        self.search_results = None
+        self.ai_response = None
+        self.analysis_result = None
+        self.suggested_services = None
+        
+    def get_full_context(self):
+        """Get complete conversation context"""
+        user_messages = []
+        ai_messages = []
+        for msg in self.conversation_history:
+            if msg.get("role") == "user":
+                user_messages.append(msg.get("content", ""))
+            elif msg.get("role") == "assistant":
+                ai_messages.append(msg.get("content", ""))
+        
+        # Add current message
+        if self.user_message not in user_messages:
+            user_messages.append(self.user_message)
+            
+        return {
+            "user_messages": user_messages,
+            "ai_messages": ai_messages,
+            "full_conversation": "\n".join(user_messages),
+            "conversation_length": len(self.conversation_history)
+        }
+    
+    def should_search_docs(self):
+        """AI decides if documentation search is needed"""
+        if not client or not crawled_data:
+            return False
+            
+        try:
+            context = self.get_full_context()
+            prompt = f"""
+Хэрэглэгчийн асуулт: {self.user_message}
+Харилцлагын контекст: {context['full_conversation'][-500:]}
+
+Энэ асуултад хариулахын тулд баримт бичгээс хайлт хийх шаардлагатай юу?
+
+'yes' эсвэл 'no' гэж хариулна уу.
+            """
+            
+            response = client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": "Та хайлтын шаардлагыг тодорхойлдог мэргэжилтэн."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=10,
+                temperature=0.2
+            )
+            
+            return response.choices[0].message.content.strip().lower() == "yes"
+        except:
+            # Fallback: search if message contains technical terms
+            tech_indicators = ["хэрхэн", "яаж", "install", "setup", "config", "тохируулах", "суулгах"]
+            return any(indicator in self.user_message.lower() for indicator in tech_indicators)
+
+def get_enhanced_ai_response(ai_context: AIContext):
+    """Enhanced conversational AI that prioritizes docs search but falls back intelligently"""
     
     if not client:
         return "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
     
-    # Get conversation history
-    history = conversation_memory.get(conversation_id, [])
+    context_info = ai_context.get_full_context()
     
-    # Build context from crawled data if available
-    context = ""
-    if context_data and crawled_data:
-        # Search for relevant content
-        search_results = search_in_crawled_data(user_message, max_results=3)
-        if search_results:
+    # Step 1: Smart document search with enhanced accuracy
+    doc_context = ""
+    search_results = []
+    found_in_docs = False
+    
+    if crawled_data:
+        search_results = search_in_crawled_data(ai_context.user_message, max_results=5)
+        
+        # Enhanced filtering - only use high precision results
+        high_precision_results = [r for r in search_results if r.get('precision_level') == 'high']
+        
+        if high_precision_results:
+            found_in_docs = True
+            ai_context.search_results = high_precision_results
+            
             relevant_pages = []
-            for result in search_results:
-                # Find the page in crawled_data to get images
+            for result in high_precision_results:
                 page = next((p for p in crawled_data if p['url'] == result['url']), None)
-                if page and page.get('images'):
-                    image_info = "\nЗургууд:\n" + "\n".join([
-                        f"- {img['alt']}: {img['url']}" if img['alt'] else f"- {img['url']}"
-                        for img in page['images']
-                    ])
-                else:
+                if page:
                     image_info = ""
-                
-                relevant_pages.append(
-                    f"Хуудас: {result['title']}\n"
-                    f"URL: {result['url']}\n"
-                    f"Холбогдох агуулга: {result['snippet']}\n"
-                    f"{image_info}\n"
-                )
-            context = "\n\n".join(relevant_pages)
+                    if page.get('images'):
+                        image_info = "\nЗургууд:\n" + "\n".join([
+                            f"- {img['alt']}: {img['url']}" if img['alt'] else f"- {img['url']}"
+                            for img in page['images'][:3]  # Limit to 3 images
+                        ])
+                    
+                    relevant_pages.append(
+                        f"📄 {result['title']}\n"
+                        f"🔗 {result['url']}\n"
+                        f"📝 {result['snippet']}\n"
+                        f"🎯 Нарийвчлал: {result['relevance_score']}/15\n"
+                        f"{image_info}\n"
+                    )
+            doc_context = "\n".join(relevant_pages)
     
-    # Build system message with context
-    system_content = """Та Cloud.mn-ийн баримт бичгийн талаар асуултад хариулдаг Монгол AI туслах юм. 
-    Хэрэглэгчтэй монгол хэлээр ярилцаарай. Хариултаа товч бөгөөд ойлгомжтой байлгаарай.
+    # Step 2: Adaptive system prompt based on search results
+    if found_in_docs:
+        personality = """Та Cloud.mn-ийн баримт бичгийн мэргэжлийн туслах. 
+        Баримт бичгийн мэдээллийг ашиглан МАШ НАРИЙВЧЛАЛТАЙ, ТОВЧ, ТОДОРХОЙ хариулт өгнө.
+        Хариултаа бүтэцтэй байлгаж, хэрэглэгчид шууд хэрэглэж болох зааварчилгаа өгнө."""
+    else:
+        personality = """Та Cloud.mn-ийн ухаалаг AI туслах. Баримт бичигт олдохгүй асуултуудад 
+        өөрийн мэдлэгээрээ хариулж, шаардлагатай бол дэмжлэгийн багт уламжлана."""
     
-    Хариулахдаа дараах зүйлсийг анхаарна уу:
-    1. Хариултаа холбогдох баримт бичгийн линкээр дэмжүүлээрэй
-    2. Хэрэв ойлгомжгүй бол тодорхой асууна уу
-    3. Хариултаа бүтэцтэй, цэгцтэй байлгаарай
-    4. Техникийн нэр томъёог монгол хэлээр тайлбарлаарай
-    5. Хэрэв холбогдох зургууд байвал тэдгээрийг хариултад оруулаарай
+    system_content = f"""{personality}
     
-    Зургийн мэдээллийг хариултад оруулахдаа:
-    - Зургийн тайлбар (alt text) байвал түүнийг ашиглаарай
-    - Зургийн URL-ийг хариултад оруулаарай
-    - Зургийн талаар товч тайлбар өгөөрэй
+ҮНДСЭН ЗАРЧИМ: Монгол хэлээр тодорхой, практик хариулт өгнө.
+
+Одоогийн нөхцөл байдал:
+- Баримт бичгээс олдсон: {'Тийм' if found_in_docs else 'Үгүй'}
+- Харилцлагын түүх: {context_info["conversation_length"]} мессэж
+- Контекстын хэмжээ: {len(context_info['full_conversation'])} тэмдэгт
+
+ХАРИУЛТЫН ЗАГВАР:
+1. Хариултыг {200 if found_in_docs else 150} үгээс багагүй байлгах
+2. Практик алхам алхмаар зааварчилгаа өгөх  
+3. Холбогдох линк болон дэмжлэг санал болгох
+4. Техникийн нэр томъёог монгол хэлээр тайлбарлах
+
+{'БАРИМТ БИЧГИЙН МЭДЭЭЛЭЛ:\n' + doc_context if doc_context else ''}
+    """
     
-    Боломжит командууд:
-    - crawl: Бүх сайтыг шүүрдэх
-    - scrape <URL>: Тодорхой хуудсыг шүүрдэх  
-    - help: Тусламж харуулах
-    - search <асуулт>: Мэдээлэл хайх"""
+    # Step 3: Build conversation with smart context management
+    messages = [{"role": "system", "content": system_content}]
     
-    if context:
-        system_content += f"\n\nКонтекст мэдээлэл:\n{context}"
+    # Add relevant conversation history
+    history_limit = 3 if found_in_docs else 5
+    recent_messages = []
+    for msg in context_info["user_messages"][-history_limit:]:
+        if msg != ai_context.user_message:
+            recent_messages.append({"role": "user", "content": msg})
     
-    # Build conversation context
-    messages = [
-        {
-            "role": "system", 
-            "content": system_content
-        }
-    ]
-    
-    # Add conversation history
-    for msg in history[-4:]:  # Last 4 messages
-        messages.append(msg)
-    
-    # Add current message
-    messages.append({"role": "user", "content": user_message})
+    messages.extend(recent_messages)
+    messages.append({"role": "user", "content": ai_context.user_message})
     
     try:
         response = client.chat.completions.create(
-            model="gpt-4.1",
+            model="gpt-4",
             messages=messages,
-            max_tokens=800,  # Increased token limit for better responses with images
-            temperature=0.7
+            max_tokens=800 if found_in_docs else 600,
+            temperature=0.4 if found_in_docs else 0.6
         )
         
         ai_response = response.choices[0].message.content
+        ai_context.ai_response = ai_response
+        ai_context.found_in_docs = found_in_docs
         
         # Store in memory
-        if conversation_id not in conversation_memory:
-            conversation_memory[conversation_id] = []
+        if ai_context.conv_id not in conversation_memory:
+            conversation_memory[ai_context.conv_id] = []
         
-        conversation_memory[conversation_id].append({"role": "user", "content": user_message})
-        conversation_memory[conversation_id].append({"role": "assistant", "content": ai_response})
+        conversation_memory[ai_context.conv_id].append({"role": "user", "content": ai_context.user_message})
+        conversation_memory[ai_context.conv_id].append({"role": "assistant", "content": ai_response})
         
-        # Keep only last 8 messages
-        if len(conversation_memory[conversation_id]) > 8:
-            conversation_memory[conversation_id] = conversation_memory[conversation_id][-8:]
+        # Keep only last 10 messages for better context
+        if len(conversation_memory[ai_context.conv_id]) > 10:
+            conversation_memory[ai_context.conv_id] = conversation_memory[ai_context.conv_id][-10:]
             
         return ai_response
         
     except Exception as e:
-        logging.error(f"OpenAI API алдаа: {e}")
-        return f"🔧 AI-тай холбогдоход саад гарлаа. Та дараах аргуудаар тусламж авч болно:\n• 'help' командыг ашиглана уу\n• 'crawl' эсвэл 'search' командуудыг туршина уу\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
+        logging.error(f"Enhanced AI response failed: {e}")
+        return f"🔧 AI системтэй холбогдоход алдаа гарлаа.\n\nТа дараах аргуудаар тусламж авч болно:\n• Асуултыг дахин тодорхой асуух\n• 'тусламж' гэж бичих\n\nАлдааны мэдээлэл: {str(e)[:100]}"
 
-def search_in_crawled_data(query: str, max_results: int = 3):
-    """Enhanced search through crawled data with better relevance scoring"""
+def send_enhanced_teams_notification(ai_context: AIContext, problems_analysis: dict):
+    """Enhanced Teams notification with detailed problem breakdown - focus on problems"""
+    if not TEAMS_WEBHOOK_URL or not problems_analysis:
+        return False
+        
+    try:
+        conv_info = get_conversation_info(ai_context.conv_id)
+        if not conv_info:
+            return False
+            
+        contact = conv_info.get("contact", {})
+        contact_name = contact.get("name", "Хэрэглэгч")
+        contact_email = contact.get("email", "Имэйл олдсонгүй")
+        
+        overall = problems_analysis.get("overall_analysis", {})
+        problems = problems_analysis.get("problems", [])
+        
+        # Create focused problem descriptions
+        problems_text = ""
+        for i, problem in enumerate(problems, 1):
+            priority_emoji = "🔴" if problem['priority'] == 'high' else "🟡" if problem['priority'] == 'medium' else "🟢"
+            category_emoji = "⚙️" if problem['category'] == 'technical' else "💼" if problem['category'] == 'service_request' else "❓"
+            complexity_emoji = "🔥" if problem['complexity'] == 'complex' else "⚡" if problem['complexity'] == 'moderate' else "✅"
+            
+            problems_text += f"""
+{priority_emoji} **Асуудал {i}:** {problem['title']}
+{category_emoji} **Төрөл:** {problem['category']}
+{complexity_emoji} **Төвөгтэй байдал:** {problem['complexity']}
+📋 **Дэлгэрэнгүй:** {problem['description']}
+"""
+        
+        # Get only the most relevant conversation context (last user message + key context)
+        context_info = ai_context.get_full_context()
+        latest_user_message = ai_context.user_message
+        
+        # Create a concise summary instead of full conversation
+        conversation_summary = ""
+        if len(context_info['user_messages']) > 1:
+            conversation_summary = f"• Өмнөх асуултууд: {len(context_info['user_messages']) - 1}\n"
+        conversation_summary += f"• Одоогийн асуулт: {latest_user_message[:200]}{'...' if len(latest_user_message) > 200 else ''}"
+        
+        # Create streamlined Teams message focused on problems
+        teams_message = f"""
+🚨 **ТЕХНИКИЙН ДЭМЖЛЭГ ШААРДЛАГАТАЙ**
+
+👤 **Хэрэглэгч:** {contact_name}
+📧 **Имэйл:** {contact_email}
+🆔 **Conversation ID:** {ai_context.conv_id}
+
+📊 **Ерөнхий үнэлгээ:**
+• Чухал байдал: {'🔴 Өндөр' if overall.get('is_critical') else '🟡 Дунд'}
+• Итгэлийн түвшин: {overall.get('confidence', 0)}%
+• Баримт бичигт олдсон: {'❌ Үгүй' if not overall.get('found_in_docs') else '✅ Тийм'}
+
+🔍 **Илрүүлсэн асуудлууд ({len(problems)}):**
+{problems_text}
+
+💬 **Харилцлагын хураангуй:**
+{conversation_summary}
+
+🤖 **AI дүгнэлт:**
+{ai_context.ai_response[:250] if ai_context.ai_response else 'AI хариулт байхгүй'}{'...' if ai_context.ai_response and len(ai_context.ai_response) > 250 else ''}
+
+🕒 **Огноо:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+🔗 **Chatwoot линк:** {CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{ai_context.conv_id}
+        """
+        
+        # Determine color based on priority
+        color = "FF0000" if overall.get('is_critical') else "FF6B35"  # Red for critical, Orange for normal
+        
+        return send_to_teams(
+            message=teams_message,
+            title=f"🚨 {contact_name} - {len(problems)} асуудал илэрлээ",
+            color=color,
+            conv_id=ai_context.conv_id
+        )
+        
+    except Exception as e:
+        logging.error(f"Enhanced Teams notification failed: {e}")
+        return False
+
+# Legacy function for backward compatibility
+def get_ai_response(user_message: str, conversation_id: int, context_data: list = None):
+    """Legacy wrapper for backward compatibility"""
+    ai_context = AIContext(conversation_id, user_message)
+    return get_enhanced_ai_response(ai_context)
+
+def search_in_crawled_data(query: str, max_results: int = 5):
+    """Enhanced search with higher precision and better relevance scoring"""
     if not crawled_data:
         return []
     
@@ -264,57 +428,84 @@ def search_in_crawled_data(query: str, max_results: int = 3):
     results = []
     scored_pages = []
     
+    # Enhanced keyword extraction for better matching
+    query_words = [w.strip() for w in query_lower.split() if len(w.strip()) > 2]
+    
     for page in crawled_data:
         score = 0
         title = page['title'].lower()
         body = page['body'].lower()
         
-        # Title matches are more important
-        if query_lower in title:
-            score += 3
-        elif any(word in title for word in query_lower.split()):
-            score += 2
-            
-        # Body matches
+        # Exact phrase matching (highest priority)
         if query_lower in body:
-            score += 2
-        elif any(word in body for word in query_lower.split()):
-            score += 1
+            score += 10
+        if query_lower in title:
+            score += 15
             
-        # Exact phrase matches are very important
-        if f'"{query_lower}"' in body:
-            score += 4
+        # Title keyword matches (high priority)
+        title_matches = sum(1 for word in query_words if word in title)
+        score += title_matches * 5
+        
+        # Body keyword matches
+        body_matches = sum(1 for word in query_words if word in body)
+        score += body_matches * 2
+        
+        # Bonus for multiple word matches in close proximity
+        if len(query_words) > 1:
+            for i, word1 in enumerate(query_words):
+                for word2 in query_words[i+1:]:
+                    if word1 in body and word2 in body:
+                        # Check if words are close together (within 50 characters)
+                        pos1 = body.find(word1)
+                        pos2 = body.find(word2)
+                        if abs(pos1 - pos2) < 50:
+                            score += 3
+        
+        # Technical terms bonus
+        tech_terms = ['config', 'setup', 'install', 'тохируулах', 'суулгах', 'server', 'сервер']
+        if any(term in query_lower for term in tech_terms) and any(term in body for term in tech_terms):
+            score += 3
             
         if score > 0:
             scored_pages.append((score, page))
     
     # Sort by score and get top results
-    scored_pages.sort(key=lambda x: x[0], reverse=True)  # Sort by score (first element of tuple)
+    scored_pages.sort(key=lambda x: x[0], reverse=True)
+    
     for score, page in scored_pages[:max_results]:
-        # Find the most relevant snippet
+        # Find the most relevant snippet with better context
         body = page['body']
-        query_words = query_lower.split()
-        
-        # Try to find a good context around the query
         best_snippet = ""
-        max_context = 300
+        max_context = 400
         
-        for word in query_words:
-            if word in body.lower():
-                start = max(0, body.lower().find(word) - 100)
-                end = min(len(body), body.lower().find(word) + 200)
-                snippet = body[start:end]
-                if len(snippet) > len(best_snippet):
-                    best_snippet = snippet
+        # Try to find snippet containing multiple query words
+        best_match_pos = -1
+        max_word_matches = 0
         
-        if not best_snippet:
+        for i in range(0, len(body) - 100, 50):
+            snippet_part = body[i:i+200].lower()
+            word_matches = sum(1 for word in query_words if word in snippet_part)
+            if word_matches > max_word_matches:
+                max_word_matches = word_matches
+                best_match_pos = i
+        
+        if best_match_pos >= 0:
+            start = max(0, best_match_pos - 100)
+            end = min(len(body), best_match_pos + 300)
+            best_snippet = body[start:end].strip()
+            if start > 0:
+                best_snippet = "..." + best_snippet
+            if end < len(body):
+                best_snippet = best_snippet + "..."
+        else:
             best_snippet = body[:max_context] + "..." if len(body) > max_context else body
             
         results.append({
             'title': page['title'],
             'url': page['url'],
             'snippet': best_snippet,
-            'relevance_score': score
+            'relevance_score': score,
+            'precision_level': 'high' if score >= 8 else 'medium' if score >= 4 else 'low'
         })
 
     return results
@@ -330,55 +521,74 @@ def scrape_single(url: str):
 
 # —— AI Analysis Functions —— #
 def analyze_user_message_with_ai(user_message: str, ai_response: str, conv_id: int):
-    """Use AI to analyze conversation history and identify the core problem"""
+    """Legacy wrapper for backward compatibility - now uses enhanced analysis"""
+    ai_context = AIContext(conv_id, user_message)
+    ai_context.ai_response = ai_response
+    analysis = analyze_conversation_for_problems(ai_context)
+    
+    if analysis:
+        # Convert new format to legacy format for compatibility
+        problems = analysis.get("problems", [])
+        overall = analysis.get("overall_analysis", {})
+        
+        return {
+            "needs_support": overall.get("needs_support", False),
+            "problem_description": problems[0]["description"] if problems else user_message[:50] + "...",
+            "core_problem": problems[0]["title"] if problems else user_message[:50] + "...",
+            "matching_services": [],  # This is now handled by smart service detection
+            "confidence": overall.get("confidence", 0),
+            "is_critical": overall.get("is_critical", False)
+        }
+    
+    return {
+        "needs_support": False,
+        "problem_description": user_message[:50] + "..." if len(user_message) > 50 else user_message,
+        "core_problem": user_message[:50] + "..." if len(user_message) > 50 else user_message,
+        "matching_services": [],
+        "confidence": 0,
+        "is_critical": False
+    }
+
+def analyze_conversation_for_problems(ai_context: AIContext):
+    """Enhanced AI analysis to identify multiple specific problems"""
     if not client:
-        return {"needs_support": False, "problem_description": "", "confidence": 0}
+        return None
     
     try:
-        # Get full conversation history
-        conversation_history = conversation_memory.get(conv_id, [])
+        context_info = ai_context.get_full_context()
         
-        # Extract user messages from conversation history
-        user_messages = []
-        for msg in conversation_history:
-            if msg.get("role") == "user":
-                user_messages.append(msg.get("content", ""))
-        
-        # Add current message if not already in history
-        if user_message not in user_messages:
-            user_messages.append(user_message)
-        
-        # Combine all user messages for analysis
-        full_conversation = "\n".join(user_messages)
-        
-        # Create service list for AI analysis
-        service_list = "\n".join([f"- {key}" for key in SERVICE_PRICES.keys()])
-        
+        # Enhanced problem analysis prompt
         analysis_prompt = f"""
-Хэрэглэгчийн бүх харилцан ярианы түүхийг дүгнэж, зөвхөн хамгийн чухал асуудлыг олж тодорхойлно уу.
+Хэрэглэгчийн бүх харилцлага: {context_info['full_conversation']}
+AI хариулт: {ai_context.ai_response}
 
-Хэрэглэгчийн бүх мессэжүүд:
-{full_conversation}
+Энэ харилцлагыг дүн шинжилж дараах ажлуудыг гүйцэтгэ:
 
-Хэрэглэгчийн сүүлийн AI хариулт: {ai_response}
+1. АСУУДЛУУДЫГ ялгаж тодорхойл (хэрэв олон асуудал байвал тус тусад нь)
+2. Техникийн нарийвчлалын түвшинг үнэлэ  
+3. Дэмжлэгийн шаардлагыг тодорхойл
+4. Microsoft Teams руу илгээх шаардлагатай эсэхийг шийд
 
-Даалгавар:
-1. Хэрэглэгч дэмжлэгийн багтай холбогдох шаардлагатай юу?
-2. Хэрэглэгчийн ХАМГИЙН ЧУХАЛ асуудлыг олж тодорхойлно уу (бусад дутуу зүйлсийг орхино)
-3. Асуудлыг 1 өгүүлбэрээр товч тодорхой тайлбарлана уу
-
-Үйлчилгээний жагсаалт:
-{service_list}
-
-АНХААРАХ: Зөвхөн гол асуудлыг олж Teams рүү илгээх. Жижиг асуулт, ерөнхий мэдээлэл, эсвэл хэвийн хариулт бол дэмжлэг хэрэггүй.
-
-Хариултаа JSON форматаар өг:
+JSON хэлбэрээр хариулна уу:
 {{
-    "needs_support": true/false,
-    "confidence": 0-100,
-    "core_problem": "хамгийн чухал асуудлын 1 өгүүлбэрийн тайлбар",
-    "matching_services": ["тохирох үйлчилгээ"],
-    "is_critical": true/false
+    "problems": [
+        {{
+            "title": "асуудлын товч нэр",
+            "description": "дэлгэрэнгүй тайлбар", 
+            "category": "technical/general/service_request",
+            "priority": "high/medium/low",
+            "complexity": "simple/moderate/complex"
+        }}
+    ],
+    "overall_analysis": {{
+        "needs_support": true/false,
+        "is_critical": true/false,
+        "confidence": 0-100,
+        "user_satisfaction": "high/medium/low",
+        "requires_teams_notification": true/false,
+        "found_in_docs": {getattr(ai_context, 'found_in_docs', False)}
+    }},
+    "recommended_action": "continue_chat/escalate_to_support/provide_service_info/mark_resolved"
 }}
         """
         
@@ -386,104 +596,34 @@ def analyze_user_message_with_ai(user_message: str, ai_response: str, conv_id: i
             model="gpt-4",
             messages=[
                 {
-                    "role": "system", 
-                    "content": "Та харилцан ярианы дүгнэлт хийгч мэргэжилтэн. Хэрэглэгчийн түүхээс зөвхөн хамгийн чухал асуудлыг олж, дэмжлэгийн багт шаардлагатай эсэхийг тодорхойлдог."
+                    "role": "system",
+                    "content": "Та мэргэжлийн техникийн дэмжлэгийн шинжээч. Асуудлуудыг тодорхойлж, шийдвэрлэх арга замыг санал болгодог."
                 },
                 {
-                    "role": "user", 
+                    "role": "user",
                     "content": analysis_prompt
                 }
             ],
-            max_tokens=250,
-            temperature=0.2
+            max_tokens=500,
+            temperature=0.3
         )
         
         analysis_text = response.choices[0].message.content.strip()
-        
-        # Try to parse JSON response
         json_match = re.search(r'\{.*\}', analysis_text, re.DOTALL)
+        
         if json_match:
-            analysis_json = json.loads(json_match.group())
-            # Use core_problem as problem_description for compatibility
-            analysis_json["problem_description"] = analysis_json.get("core_problem", "")
-            return analysis_json
-        else:
-            # Fallback analysis using AI to determine if issue is critical
-            if client:
-                try:
-                    fallback_prompt = f"""
-Хэрэглэгчийн бүх харилцлага: {full_conversation}
-
-Энэ харилцлагыг дүгнэж дараах асуултанд хариулна уу:
-1. Энэ нь жинхэнэ техникийн асуудал мөн үү?
-2. Дэмжлэгийн баг шаардлагатай мөн үү?
-3. Хэр чухал вэ? (1-100)
-
-JSON хэлбэрээр хариулна уу:
-{{
-    "needs_support": true/false,
-    "is_critical": true/false,
-    "confidence": 0-100,
-    "core_problem": "асуудлын товч тайлбар"
-}}
-                    """
-                    
-                    fallback_response = client.chat.completions.create(
-                        model="gpt-4",
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": "Та техникийн асуудлыг тодорхойлох мэргэжилтэн. Хэрэглэгчийн харилцлагаас жинхэнэ асуудлыг олж чаддаг."
-                            },
-                            {
-                                "role": "user",
-                                "content": fallback_prompt
-                            }
-                        ],
-                        max_tokens=150,
-                        temperature=0.2
-                    )
-                    
-                    fallback_text = fallback_response.choices[0].message.content.strip()
-                    fallback_match = re.search(r'\{.*\}', fallback_text, re.DOTALL)
-                    
-                    if fallback_match:
-                        fallback_json = json.loads(fallback_match.group())
-                        return {
-                            "needs_support": fallback_json.get("needs_support", False),
-                            "problem_description": fallback_json.get("core_problem", user_message[:100]),
-                            "core_problem": fallback_json.get("core_problem", user_message[:100]),
-                            "matching_services": [],
-                            "confidence": fallback_json.get("confidence", 20),
-                            "is_critical": fallback_json.get("is_critical", False),
-                            "suggested_action": "AI fallback analysis"
-                        }
-                except Exception as e:
-                    logging.error(f"AI fallback analysis failed: {e}")
-            
-            # Final fallback if AI is not available
-            return {
-                "needs_support": False, 
-                "problem_description": user_message[:50] + "..." if len(user_message) > 50 else user_message,
-                "core_problem": user_message[:50] + "..." if len(user_message) > 50 else user_message,
-                "matching_services": [], 
-                "confidence": 0,
-                "is_critical": False
-            }
-            
+            analysis_result = json.loads(json_match.group())
+            ai_context.analysis_result = analysis_result
+            return analysis_result
+        
+        return None
+        
     except Exception as e:
-        logging.error(f"AI analysis алдаа: {e}")
-        return {
-            "needs_support": False, 
-            "problem_description": user_message[:50] + "..." if len(user_message) > 50 else user_message,
-            "core_problem": user_message[:50] + "..." if len(user_message) > 50 else user_message,
-            "matching_services": [], 
-            "confidence": 0,
-            "is_critical": False
-        }
+        logging.error(f"Enhanced problem analysis failed: {e}")
+        return None
 
 def suggest_services_from_analysis(matching_services: list):
-    """Generate service suggestions based on analysis"""
+    """Generate intelligent service suggestions based on analysis"""
     if not matching_services:
         return ""
     
@@ -499,8 +639,59 @@ def suggest_services_from_analysis(matching_services: list):
     suggestions += "📞 Эдгээр үйлчилгээний талаар дэлгэрэнгүй мэдээлэл авахыг хүсвэл 'дэмжлэг' гэж бичнэ үү."
     return suggestions
 
-# —— Enhanced AI Response with Smart Analysis —— #
+def smart_service_detection(ai_context: AIContext):
+    """Smart service detection using AI context"""
+    if not client:
+        return []
+    
+    try:
+        context_info = ai_context.get_full_context()
+        service_list = "\n".join([f"- {key}" for key in SERVICE_PRICES.keys()])
+        
+        detection_prompt = f"""
+Хэрэглэгчийн харилцлага: {context_info['full_conversation']}
+AI хариулт: {ai_context.ai_response or ''}
 
+Боломжтой үйлчилгээнүүд:
+{service_list}
+
+Хэрэглэгчийн асуудалтай хамгийн тохирох үйлчилгээнүүдийг жагсаана уу:
+
+JSON хэлбэрээр хариулна уу:
+{{
+    "matching_services": ["үйлчилгээний жагсаалт"],
+    "confidence": 0-100
+}}
+        """
+        
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Та үйлчилгээний тохирлыг тодорхойлох мэргэжилтэн."
+                },
+                {
+                    "role": "user",
+                    "content": detection_prompt
+                }
+            ],
+            max_tokens=150,
+            temperature=0.2
+        )
+        
+        result = response.choices[0].message.content.strip()
+        json_match = re.search(r'\{.*\}', result, re.DOTALL)
+        
+        if json_match:
+            detection_result = json.loads(json_match.group())
+            return detection_result.get("matching_services", [])
+        
+        return []
+        
+    except Exception as e:
+        logging.error(f"Smart service detection failed: {e}")
+        return []
 
 # —— Enhanced Chatwoot Integration —— #
 def send_to_chatwoot(conv_id: int, content: str, message_type: str = "outgoing"):
@@ -726,7 +917,7 @@ def api_crawl():
 # —— Enhanced Chatwoot Webhook —— #
 @app.route("/webhook/chatwoot", methods=["POST"])
 def chatwoot_webhook():
-    """Enhanced webhook with better AI integration and Teams notifications"""
+    """Enhanced conversational webhook - ChatGPT style interaction"""
     global crawled_data, crawl_status
     
     data = request.json or {}
@@ -742,267 +933,287 @@ def chatwoot_webhook():
 
     logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
 
-    # Handle different commands
-    if text.lower() == "crawl":
-        # Check if auto-crawl already completed
-        if crawl_status["status"] == "completed":
-            response = f"✅ Сайт аль хэдийн шүүрдэгдсэн байна! {crawl_status.get('pages_count', 0)} хуудас бэлэн.\n\n'search <асуулт>' командаар хайлт хийж болно!"
-            send_to_chatwoot(conv_id, response)
-        elif crawl_status["status"] == "running":
-            send_to_chatwoot(conv_id, "🔄 Сайт одоо шүүрдэгдэж байна. Түр хүлээнэ үү...")
-        else:
-            send_to_chatwoot(conv_id, f"🔄 Сайн байна уу {contact_name}! Сайтыг шүүрдэж байна...")
-            
-            crawl_status = {"status": "running", "message": f"Manual crawl started by {contact_name}"}
-            crawled_data = crawl_and_scrape(ROOT_URL)
-            
-            if not crawled_data:
-                crawl_status = {"status": "failed", "message": "Manual crawl failed"}
-                send_to_chatwoot(conv_id, "❌ Шүүрдэх явцад алдаа гарлаа. Дахин оролдоно уу.")
-            else:
-                crawl_status = {
-                    "status": "completed", 
-                    "message": f"Manual crawl completed by {contact_name}",
-                    "pages_count": len(crawled_data),
-                    "timestamp": datetime.now().isoformat()
-                }
-                lines = [f"📄 {p['title']} — {p['url']}" for p in crawled_data[:3]]
-                response = f"✅ {len(crawled_data)} хуудас амжилттай шүүрдлээ!\n\nЭхний 3 хуудас:\n" + "\n".join(lines) + f"\n\nОдоо 'search <асуулт>' командаар хайлт хийж болно!"
-                send_to_chatwoot(conv_id, response)
+    # Auto-crawl status check
+    if crawl_status["status"] == "not_started" and AUTO_CRAWL_ON_START:
+        auto_crawl_on_startup()
 
-    elif text.lower().startswith("scrape"):
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            send_to_chatwoot(conv_id, "⚠️ Зөв хэлбэр: `scrape <бүрэн-URL>`")
-        else:
-            url = parts[1].strip()
-            send_to_chatwoot(conv_id, f"🔄 {url} хаягыг шүүрдэж байна...")
-            
-            try:
-                page = scrape_single(url)
-                summary = get_ai_response(f"Энэ агуулгыг товчлон хэлээрэй: {page['body'][:1500]}", conv_id)
-                
-                response = f"📄 **{page['title']}**\n\n📝 **Товчилсон агуулга:**\n{summary}\n\n🔗 {url}"
-                send_to_chatwoot(conv_id, response)
-            except Exception as e:
-                error_msg = f"❌ {url} хаягыг шүүрдэхэд алдаа гарлаа: {e}"
-                send_to_chatwoot(conv_id, error_msg)
-
-    elif text.lower().startswith("search"):
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            send_to_chatwoot(conv_id, "⚠️ Зөв хэлбэр: `search <хайх үг>`")
-        else:
-            query = parts[1].strip()
-            
-            # Check crawl status first
-            if crawl_status["status"] == "running":
-                send_to_chatwoot(conv_id, "🔄 Сайт шүүрдэгдэж байна. Түр хүлээгээд дахин оролдоно уу.")
-            elif crawl_status["status"] in ["not_started", "failed", "error"] or not crawled_data:
-                send_to_chatwoot(conv_id, "📚 Мэдээлэл бэлэн байхгүй байна. 'crawl' командыг ашиглан сайтыг шүүрдүүлнэ үү.")
-            else:
-                send_to_chatwoot(conv_id, f"🔍 '{query}' хайж байна...")
-                
-                results = search_in_crawled_data(query)
-                if results:
-                    response = f"🔍 '{query}' хайлтын үр дүн ({len(results)} илэрц):\n\n"
-                    for i, result in enumerate(results, 1):
-                        response += f"{i}. **{result['title']}**\n"
-                        response += f"   {result['snippet']}\n"
-                        response += f"   🔗 {result['url']}\n\n"
-                    
-                    send_to_chatwoot(conv_id, response)
-                else:
-                    response = f"❌ '{query}' хайлтаар илэрц олдсонгүй."
-                    send_to_chatwoot(conv_id, response)
-
-    elif text.lower() in ["help", "тусламж"]:
-        # Show status-aware help
-        status_info = ""
-        if crawl_status["status"] == "completed":
-            status_info = f"✅ {crawl_status.get('pages_count', 0)} хуудас бэлэн байна.\n"
-        elif crawl_status["status"] == "running":
-            status_info = "🔄 Сайт шүүрдэгдэж байна.\n"
-        elif crawl_status["status"] == "disabled":
-            status_info = "⚠️ Автомат шүүрдэх идэвхгүй байна.\n"
-        
+    # Handle special commands (minimal, only essential ones)
+    if text.lower() in ["тусламж", "help", "туслах"]:
         help_text = f"""
-👋 Сайн байна уу {contact_name}! Би Cloud.mn-ийн AI туслах юм.
+👋 Сайн байна уу {contact_name}! Би Cloud.mn-ийн AI туслах.
 
 📊 **Төлөв:**
-{status_info}
+{'✅ Баримт бичиг бэлэн байна' if crawl_status["status"] == "completed" else '🔄 Системийг бэлтгэж байна...'}
 
-🤖 **Боломжит командууд:**
-• `crawl` - Сайтыг шүүрдэх (шаардлагатай бол)
-• `scrape <URL>` - Тодорхой хуудас шүүрдэх
-• `search <асуулт>` - Мэдээлэл хайх
-• `help` - Энэ тусламжийг харуулах
+💬 **Хэрхэн ашиглах:**
+• Асуултаа эсвэл асуудлаа энгийн хэлээр бичнэ үү
+• Би эхлээд docs.cloud.mn-аас хайж, хариулна
+• Олдохгүй бол миний мэдлэгээр туслана
+• Шаардлагатай бол мэргэжлийн дэмжлэгт холбож өгнө
 
-💬 **Чөлөөт ярилцлага:**
-Та мөн надад асуулт асууж, ярилцаж болно. Би монгол хэлээр хариулна.
+🔧 **Жишээ асуултууд:**
+• "Docker хэрхэн суулгах вэ?"
+• "Nginx тохируулах заавар хэрэгтэй"
+• "Серверийн алдаа гарч байна"
 
-⏰ Үргэлж тусламжид бэлэн байна!
+Асуултаа чөлөөтэй бичээрэй! 😊
         """
         send_to_chatwoot(conv_id, help_text)
 
-    elif text.lower() in ["баяртай", "goodbye", "баай"]:
-        response = f"👋 Баяртай {contact_name}! Дараа уулзацгаая!"
+    elif text.lower() in ["баяртай", "goodbye", "баай", "дууслаа"]:
+        response = f"👋 Баяртай {contact_name}! Дараа дахин тусламж хэрэгтэй бол эргээд ирээрэй!"
         send_to_chatwoot(conv_id, response)
         mark_conversation_resolved(conv_id)
 
-    else:
-        # Check if this is a response to a confirmation request
+    # Handle email confirmation workflows
+    elif text.lower() in ["цуцлах", "cancel", "үгүй цуцлах"]:
         memory = conversation_memory.get(conv_id, [])
-        if memory and "pending_confirmation" in memory[-1].get("content", ""):
-            # Use GPT to understand the response
-            confirmation_response = client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                {
-                    "role": "system",
-                    "content": """Та хэрэглэгчийн хариултыг дүгнэж, зөвшөөрөл эсвэл татгалзлыг тодорхойлох ёстой.
-                    Хариултад 'yes' эсвэл 'no' гэж бичнэ үү."""
-                },
-                {
-                    "role": "user",
-                    "content": f"Хэрэглэгчийн хариулт: {text}\n\nЭнэ нь зөвшөөрөл мөн үү, эсвэл татгалзвал мөн үү?"
-                }
-                ],
-                max_tokens=10,
-                temperature=0.3
-            )
-            
-            is_confirmed = confirmation_response.choices[0].message.content.strip().lower() == "yes"
-            
-            if is_confirmed:
-                # Email хаяг асуух
-                email_request = """
-✅ Баярлалаа! Таны асуудлыг дэмжлэгийн багтай хуваалцахын тулд email хаягаа өгнө үү?
-
-📧 **Email хаяг оруулна уу:**
-Жишээ: example@gmail.com
-
-Энэ нь дэмжлэгийн багт танай холбогдох мэдээллийг илгээхэд ашиглагдана.
-                """
-                send_to_chatwoot(conv_id, email_request)
-                
-                # Mark as waiting for email
-                conversation_memory[conv_id].append({"role": "assistant", "content": "waiting_for_email"})
-            else:
-                send_to_chatwoot(conv_id, "✅ Ойлголоо. Таны асуудлыг дэмжлэгийн баг руу илгээхгүй байх болно.")
-                
-        # Check if waiting for email address
-        elif memory and "waiting_for_email" in memory[-1].get("content", ""):
-            # Allow user to cancel email request
-            if text.lower() in ["цуцлах", "cancel", "үгүй", "no", "болих"]:
-                send_to_chatwoot(conv_id, "✅ Email хаяг өгөх хүсэлтийг цуцаллаа. Та дараа дахин хүсэлт илгээж болно.")
-                # Clear waiting state
-                conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] if "waiting_for_email" not in msg.get("content", "")]
-                return jsonify({"status": "success"}), 200
-            
-            # Validate email format
-            import re
-            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-            
-            if re.match(email_pattern, text.strip()):
-                user_email = text.strip()
-                
-                # Get the original question and AI response
-                original_question = None
-                ai_response = None
-                
-                for i, msg in enumerate(memory):
-                    if "pending_confirmation" in msg.get("content", ""):
-                        if i >= 2:
-                            ai_response = memory[i-1].get("content", "")
-                            original_question = memory[i-2].get("content", "")
-                        break
-                
-                # Send to Teams with email
-                send_teams_notification(
-                    conv_id,
-                    f"AI хариулт: {ai_response}\n\nХэрэглэгчийн асуулт: {original_question}\n\nИмэйл хаяг: {user_email}",
-                    "outgoing",
-                    is_unsolved=True,
-                    confirmed=True,
-                    user_email=user_email,
-                    original_question=original_question
-                )
-                
-                send_to_chatwoot(conv_id, f"✅ Баярлалаа! Таны асуудлыг ({user_email}) дэмжлэгийн баг руу илгээлээ. Тун удахгүй холбогдох болно.")
-                
-                # Clear waiting state
-                conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] if "waiting_for_email" not in msg.get("content", "")]
-                
-            else:
-                send_to_chatwoot(conv_id, "❌ Буруу email хэлбэр байна. Зөв email хаяг оруулна уу (жишээ: example@gmail.com)\n\n💡 'цуцлах' гэж бичвэл email өгөхгүйгээр гарж болно.")
-                
+        if memory and ("pending_confirmation" in memory[-1].get("content", "") or "waiting_for_email" in memory[-1].get("content", "")):
+            send_to_chatwoot(conv_id, "✅ Ойлголоо. Харилцлагыг үргэлжлүүлцгээе.")
+            # Clear waiting states
+            conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] 
+                                         if not any(state in msg.get("content", "") for state in ["pending_confirmation", "waiting_for_email"])]
         else:
-            # General AI conversation
-            # send_to_chatwoot(conv_id, "🤔 Боловсруулж байна...")
-            ai_response = get_ai_response(text, conv_id, crawled_data)
-            send_to_chatwoot(conv_id, ai_response)
+            # Handle as normal conversation
+            process_conversational_message(conv_id, text, contact_name)
+
+    else:
+        # Check if this is a response to confirmation or email request
+        memory = conversation_memory.get(conv_id, [])
+        
+        if memory and "pending_confirmation" in memory[-1].get("content", ""):
+            handle_confirmation_response(conv_id, text, contact_name)
+        elif memory and "waiting_for_email" in memory[-1].get("content", ""):
+            handle_email_response(conv_id, text, contact_name)
+        else:
+            # Normal conversational interaction
+            process_conversational_message(conv_id, text, contact_name)
+
+    return jsonify({"status": "success"}), 200
+
+def process_conversational_message(conv_id: int, text: str, contact_name: str):
+    """Process normal conversational messages with enhanced AI"""
+    
+    # Create AI context
+    ai_context = AIContext(conv_id, text)
+    
+    # Get enhanced AI response
+    ai_response = get_enhanced_ai_response(ai_context)
+    send_to_chatwoot(conv_id, ai_response)
+    
+    # Enhanced analysis and decision making
+    analysis = analyze_conversation_for_problems(ai_context)
+    
+    if analysis:
+        overall = analysis.get("overall_analysis", {})
+        problems = analysis.get("problems", [])
+        recommended_action = analysis.get("recommended_action", "continue_chat")
+        
+        # Log analysis for debugging
+        logging.info(f"Analysis for conv {conv_id}: {len(problems)} problems, action: {recommended_action}, critical: {overall.get('is_critical', False)}")
+        
+        # Handle different scenarios based on analysis
+        if overall.get("requires_teams_notification", False) or (overall.get("is_critical", False) and overall.get("needs_support", False)):
+            # Send detailed Teams notification immediately for critical issues
+            teams_sent = send_enhanced_teams_notification(ai_context, analysis)
             
-            # Smart AI Analysis - дүгнэлт хийх
-            analysis = analyze_user_message_with_ai(text, ai_response, conv_id)
-            
-            # Холбогдох үйлчилгээ санал болгох
-            if analysis.get("matching_services"):
-                service_suggestions = suggest_services_from_analysis(analysis["matching_services"])
-                if service_suggestions:
-                    send_to_chatwoot(conv_id, service_suggestions)
-            
-            # Дэмжлэгийн багтай холбогдох шаардлагатай эсэхийг шалгах
-            needs_support = analysis.get("needs_support", False)
-            confidence = analysis.get("confidence", 0)
-            is_critical = analysis.get("is_critical", False)
-            
-            # Зөвхөн чухал асуудлыг Teams рүү илгээх
-            if needs_support and is_critical and confidence > 50:
-                # Өндөр итгэлтэй + чухал асуудал гэж үзэж байвал
+            if teams_sent:
                 confirmation_message = f"""
-❓ Таны тулгарч байгаа асуудлыг шийдвэрлэхэд мэргэжлийн дэмжлэг шаардлагатай байна. Дэмжлэгийн баг руу илгээх үү?
+🚨 Таны асуудал мэргэжлийн дэмжлэгийн багт автоматаар илгээгдлээ.
 
-🔍 **Асуудал:** {analysis.get('core_problem', 'Техникийн асуудлын товч тайлбар')}
-📊 **Чухал байдал:** {'Өндөр' if is_critical else 'Дунд'}
-🎯 **Итгэлийн түвшин:** {confidence}%
+📋 **Илрүүлсэн асуудлууд:** {len(problems)}
+📊 **Чухал байдал:** {'🔴 Өндөр' if overall.get('is_critical') else '🟡 Дунд зэрэг'}
 
-Зөвшөөрч байвал "тийм" эсвэл "зөвшөөрч байна" гэж бичнэ үү.
-Зөвшөөрөхгүй бол "үгүй" эсвэл "зөвшөөрөхгүй" гэж бичнэ үү.
+Дэмжлэгийн баг тун удахгүй танай асуудлыг шийдвэрлэхээр холбогдох болно.
+
+Өөр асуулт байвал чөлөөтэй асуугаарай! 😊
                 """
                 send_to_chatwoot(conv_id, confirmation_message)
                 
-                # Store the conversation with pending confirmation
-                if conv_id not in conversation_memory:
-                    conversation_memory[conv_id] = []
-                conversation_memory[conv_id].append({"role": "assistant", "content": confirmation_message + " pending_confirmation"})
-                
-            elif needs_support and confidence > 30:
-                # Дунд зэргийн итгэлтэйгээр илүү мэдээлэл асуух
-                clarification_message = f"""
-🤔 Танай асуудлыг илүү сайн ойлгохын тулд нэмэлт мэдээлэл хэрэгтэй байна.
+        elif recommended_action == "escalate_to_support" and overall.get("needs_support", False):
+            # Ask for confirmation before escalating
+            core_problem = problems[0]["title"] if problems else "Техникийн асуудал"
+            confirmation_message = f"""
+🤔 Таны асуудал: "{core_problem}"
 
-📋 **Дэлгэрэнгүй мэдээлэл өгнө үү:**
-• Ямар алдаа гарч байна?
-• Хэзээнээс эхэлсэн асуудал вэ?
-• Ямар системд/серверт асуудал гарч байна?
+Энэ асуудлыг мэргэжлийн дэмжлэгийн багт шилжүүлэх үү?
 
-Эсвэл "дэмжлэг" гэж бичвэл мэргэжлийн баг руу холбож өгөх болно.
-                """
-                send_to_chatwoot(conv_id, clarification_message)
+✅ **Тийм** - дэмжлэгийн багт илгээх
+❌ **Үгүй** - харилцлагыг үргэлжлүүлэх
+
+Та сонголтоо бичнэ үү.
+            """
+            send_to_chatwoot(conv_id, confirmation_message)
             
-            # Зөвхөн чухал асуудлын хувьд Teams notification-г зөвшөөрснөөр илгээнэ
-            # Бусад ерөнхий асуултуудад Teams илгээхгүй
+            # Store confirmation state
+            if conv_id not in conversation_memory:
+                conversation_memory[conv_id] = []
+            conversation_memory[conv_id].append({"role": "assistant", "content": confirmation_message + " pending_confirmation"})
+                
+        elif recommended_action == "provide_service_info":
+            # Smart service suggestions
+            services = smart_service_detection(ai_context)
+            if services:
+                service_suggestions = suggest_services_from_analysis(services)
+                if service_suggestions:
+                    send_to_chatwoot(conv_id, service_suggestions)
+                    
+        elif recommended_action == "mark_resolved" and overall.get("user_satisfaction") == "high":
+            # Offer to close if user seems satisfied
+            close_suggestion = f"""
+✅ Таны асуулт хангалттай хариулагдсан бололтой!
 
-    # Үйлчилгээний үнэ харуулах
-    services = get_services_in_text(text)
-    if services:
-        price_msg = "💡 Та дараах үйлчилгээ(үүд)-ийн үнийн мэдээлэл:\n"
-        for key, info in services:
-            price_msg += f"\n• {info['desc']}\n   ➡️ Үнэ: {info['price']}\n"
-        send_to_chatwoot(conv_id, price_msg)
+Өөр асуулт байвал чөлөөтэй асуугаарай, эсвэл харилцлагыг дуусгахыг хүсвэл "баяртай" гэж бичнэ үү. 😊
+            """
+            send_to_chatwoot(conv_id, close_suggestion)
 
-    return jsonify({"status": "success"}), 200
+def handle_confirmation_response(conv_id: int, text: str, contact_name: str):
+    """Handle user response to Teams escalation confirmation"""
+    
+    if not client:
+        send_to_chatwoot(conv_id, "🔑 AI систем одоогоор боломжгүй байна. Дахин оролдоно уу.")
+        return
+    
+    try:
+        # Use AI to understand the response
+        confirmation_response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Хэрэглэгчийн хариултыг дүгнэж зөвшөөрөл эсвэл татгалзлыг тодорхойл. 'yes' эсвэл 'no' гэж хариулна уу."
+                },
+                {
+                    "role": "user",
+                    "content": f"Хэрэглэгчийн хариулт: {text}\n\nЭнэ зөвшөөрөл мөн үү?"
+                }
+            ],
+            max_tokens=10,
+            temperature=0.2
+        )
+        
+        is_confirmed = confirmation_response.choices[0].message.content.strip().lower() == "yes"
+        
+        if is_confirmed:
+            # Request email
+            email_request = f"""
+✅ Баярлалаа {contact_name}!
+
+Дэмжлэгийн багт танай асуудлыг илгээхийн тулд email хаягаа бичнэ үү?
+
+📧 **Жишээ:** example@gmail.com
+
+💡 Хэрэв email өгөхгүй бол "цуцлах" гэж бичнэ үү.
+            """
+            send_to_chatwoot(conv_id, email_request)
+            
+            # Update conversation state
+            conversation_memory[conv_id].append({"role": "assistant", "content": "waiting_for_email"})
+        else:
+            send_to_chatwoot(conv_id, f"✅ Ойлголоо {contact_name}. Өөр асуулт байвал чөлөөтэй асуугаарай!")
+            # Clear confirmation state
+            conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] 
+                                         if "pending_confirmation" not in msg.get("content", "")]
+            
+    except Exception as e:
+        logging.error(f"Error handling confirmation: {e}")
+        send_to_chatwoot(conv_id, "🔧 Системийн алдаа гарлаа. Дахин оролдоно уу.")
+
+def handle_email_response(conv_id: int, text: str, contact_name: str):
+    """Handle user email input"""
+    
+    import re
+    
+    # Validate email format
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    
+    if re.match(email_pattern, text.strip()):
+        user_email = text.strip()
+        
+        # Get the conversation context for Teams
+        memory = conversation_memory.get(conv_id, [])
+        
+        # Find the original problem context
+        original_question = ""
+        ai_response = ""
+        
+        # Look for the AI response before email collection started
+        for i, msg in enumerate(memory):
+            if "waiting_for_email" in msg.get("content", ""):
+                # Find previous user and AI messages
+                if i >= 2:
+                    ai_response = memory[i-2].get("content", "")
+                    if i >= 3:
+                        original_question = memory[i-3].get("content", "")
+                break
+        
+        # Create enhanced AI context for Teams notification
+        ai_context = AIContext(conv_id, original_question or "Email холбогдох хүсэлт")
+        ai_context.ai_response = ai_response
+        
+        # Analyze the conversation for detailed Teams notification
+        analysis = analyze_conversation_for_problems(ai_context)
+        
+        if analysis:
+            # Send to Teams with detailed analysis
+            teams_sent = send_enhanced_teams_notification(ai_context, analysis)
+            
+            if teams_sent:
+                send_to_chatwoot(conv_id, f"""
+✅ Амжилттай! Таны асуудлыг дэмжлэгийн багт илгээлээ.
+
+📧 **Email:** {user_email}
+⏰ **Хүлээх хугацаа:** 1-2 ажлын өдөр
+
+Дэмжлэгийн баг танай email хаяг руу холбогдох болно.
+
+Өөр асуулт байвал чөлөөтэй асуугаарай! 😊
+                """)
+            else:
+                send_to_chatwoot(conv_id, "❌ Teams руу илгээхэд алдаа гарлаа. Дахин оролдоно уу.")
+        else:
+            # Fallback - send basic Teams notification
+            context_info = ai_context.get_full_context()
+            basic_teams_message = f"""
+🚨 **ДЭМЖЛЭГ ХҮСЭЛТ**
+
+👤 **Хэрэглэгч:** {contact_name}
+📧 **Имэйл:** {user_email}
+🆔 **Conversation ID:** {conv_id}
+
+💬 **Харилцлага:**
+{context_info['full_conversation'][-500:]}
+
+🕒 **Огноо:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            """
+            
+            teams_sent = send_to_teams(
+                message=basic_teams_message,
+                title=f"📧 {contact_name} - Дэмжлэг хүсэлт",
+                color="FF6B35",
+                conv_id=conv_id
+            )
+            
+            if teams_sent:
+                send_to_chatwoot(conv_id, f"✅ Таны асуудлыг дэмжлэгийн багт илгээлээ ({user_email}). Тун удахгүй холбогдох болно.")
+        
+        # Clear waiting state
+        conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] 
+                                     if "waiting_for_email" not in msg.get("content", "")]
+        
+    else:
+        send_to_chatwoot(conv_id, """
+❌ Буруу email хэлбэр байна.
+
+📧 **Зөв хэлбэр:** example@gmail.com
+💡 **Цуцлах:** "цуцлах" гэж бичнэ үү
+        """)
+
+# Legacy function for backward compatibility  
+def get_ai_response(user_message: str, conversation_id: int, context_data: list = None):
+    """Legacy wrapper for backward compatibility"""
+    ai_context = AIContext(conversation_id, user_message)
+    return get_enhanced_ai_response(ai_context)
 
 
 # —— Additional API Endpoints —— #
