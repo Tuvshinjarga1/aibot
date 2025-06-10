@@ -271,6 +271,9 @@ def get_enhanced_ai_response(ai_context: AIContext):
         personality = """Та Cloud.mn-ийн ухаалаг AI туслах. Баримт бичигт олдохгүй асуултуудад 
         өөрийн мэдлэгээрээ хариулж, шаардлагатай бол дэмжлэгийн багт уламжлана."""
     
+    # Prepare documentation section to avoid backslash in f-string
+    doc_section = 'БАРИМТ БИЧГИЙН МЭДЭЭЛЭЛ:\n' + doc_context if doc_context else ''
+    
     system_content = f"""{personality}
     
 ҮНДСЭН ЗАРЧИМ: Монгол хэлээр тодорхой, практик хариулт өгнө.
@@ -286,7 +289,7 @@ def get_enhanced_ai_response(ai_context: AIContext):
 3. Холбогдох линк болон дэмжлэг санал болгох
 4. Техникийн нэр томъёог монгол хэлээр тайлбарлах
 
-{'БАРИМТ БИЧГИЙН МЭДЭЭЛЭЛ:\n' + doc_context if doc_context else ''}
+{doc_section}
     """
     
     # Step 3: Build conversation with smart context management
