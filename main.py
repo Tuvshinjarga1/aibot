@@ -965,7 +965,7 @@ def chatwoot_webhook():
 
     elif text.lower() in ["баяртай", "goodbye", "баай", "дууслаа"]:
         response = f"👋 Баяртай {contact_name}! Дараа дахин тусламж хэрэгтэй бол эргээд ирээрэй!"
-                send_to_chatwoot(conv_id, response)
+        send_to_chatwoot(conv_id, response)
         mark_conversation_resolved(conv_id)
 
     # Handle email confirmation workflows
@@ -980,7 +980,7 @@ def chatwoot_webhook():
             # Handle as normal conversation
             process_conversational_message(conv_id, text, contact_name)
             
-            else:
+    else:
         # Check if this is a response to confirmation or email request
         memory = conversation_memory.get(conv_id, [])
         
@@ -988,7 +988,7 @@ def chatwoot_webhook():
             handle_confirmation_response(conv_id, text, contact_name)
         elif memory and "waiting_for_email" in memory[-1].get("content", ""):
             handle_email_response(conv_id, text, contact_name)
-                else:
+        else:
             # Normal conversational interaction
             process_conversational_message(conv_id, text, contact_name)
 
@@ -1079,9 +1079,9 @@ def handle_confirmation_response(conv_id: int, text: str, contact_name: str):
     
     try:
         # Use AI to understand the response
-            confirmation_response = client.chat.completions.create(
-                model="gpt-4",
-                messages=[
+        confirmation_response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
                 {
                     "role": "system",
                     "content": "Хэрэглэгчийн хариултыг дүгнэж зөвшөөрөл эсвэл татгалзлыг тодорхойл. 'yes' эсвэл 'no' гэж хариулна уу."
@@ -1090,14 +1090,14 @@ def handle_confirmation_response(conv_id: int, text: str, contact_name: str):
                     "role": "user",
                     "content": f"Хэрэглэгчийн хариулт: {text}\n\nЭнэ зөвшөөрөл мөн үү?"
                 }
-                ],
-                max_tokens=10,
+            ],
+            max_tokens=10,
             temperature=0.2
-            )
-            
-            is_confirmed = confirmation_response.choices[0].message.content.strip().lower() == "yes"
-            
-            if is_confirmed:
+        )
+        
+        is_confirmed = confirmation_response.choices[0].message.content.strip().lower() == "yes"
+        
+        if is_confirmed:
             # Request email
             email_request = f"""
 ✅ Баярлалаа {contact_name}!
@@ -1107,12 +1107,12 @@ def handle_confirmation_response(conv_id: int, text: str, contact_name: str):
 📧 **Жишээ:** example@gmail.com
 
 💡 Хэрэв email өгөхгүй бол "цуцлах" гэж бичнэ үү.
-                """
-                send_to_chatwoot(conv_id, email_request)
-                
+            """
+            send_to_chatwoot(conv_id, email_request)
+            
             # Update conversation state
-                conversation_memory[conv_id].append({"role": "assistant", "content": "waiting_for_email"})
-            else:
+            conversation_memory[conv_id].append({"role": "assistant", "content": "waiting_for_email"})
+        else:
             send_to_chatwoot(conv_id, f"✅ Ойлголоо {contact_name}. Өөр асуулт байвал чөлөөтэй асуугаарай!")
             # Clear confirmation state
             conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] 
@@ -1125,31 +1125,31 @@ def handle_confirmation_response(conv_id: int, text: str, contact_name: str):
 def handle_email_response(conv_id: int, text: str, contact_name: str):
     """Handle user email input"""
     
-            import re
+    import re
     
     # Validate email format
-            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-            
-            if re.match(email_pattern, text.strip()):
-                user_email = text.strip()
-                
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    
+    if re.match(email_pattern, text.strip()):
+        user_email = text.strip()
+        
         # Get the conversation context for Teams
         memory = conversation_memory.get(conv_id, [])
-                
+        
         # Find the original problem context
         original_question = ""
         ai_response = ""
         
         # Look for the AI response before email collection started
-                for i, msg in enumerate(memory):
+        for i, msg in enumerate(memory):
             if "waiting_for_email" in msg.get("content", ""):
                 # Find previous user and AI messages
-                        if i >= 2:
+                if i >= 2:
                     ai_response = memory[i-2].get("content", "")
                     if i >= 3:
                         original_question = memory[i-3].get("content", "")
                         break
-                
+        
         # Create enhanced AI context for Teams notification
         ai_context = AIContext(conv_id, original_question or "Email холбогдох хүсэлт")
         ai_context.ai_response = ai_response
