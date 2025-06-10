@@ -987,7 +987,7 @@ def chatwoot_webhook():
             # Handle as normal conversation
             process_conversational_message(conv_id, text, contact_name)
             
-            else:
+        else:
         # Check if this is a response to confirmation or email request
         memory = conversation_memory.get(conv_id, [])
         
