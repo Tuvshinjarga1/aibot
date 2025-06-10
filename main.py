@@ -972,7 +972,7 @@ def chatwoot_webhook():
 
     elif text.lower() in ["баяртай", "goodbye", "баай", "дууслаа"]:
         response = f"👋 Баяртай {contact_name}! Дараа дахин тусламж хэрэгтэй бол эргээд ирээрэй!"
-                send_to_chatwoot(conv_id, response)
+        send_to_chatwoot(conv_id, response)
         mark_conversation_resolved(conv_id)
 
     # Handle email confirmation workflows
