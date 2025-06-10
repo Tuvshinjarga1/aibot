@@ -242,61 +242,68 @@ def get_enhanced_ai_response(ai_context: AIContext):
             found_in_docs = True
             ai_context.search_results = high_precision_results
             
+            # If documents found, return only document content without AI commentary
             relevant_pages = []
             for result in high_precision_results:
                 page = next((p for p in crawled_data if p['url'] == result['url']), None)
                 if page:
                     image_info = ""
                     if page.get('images'):
-                        image_info = "\nЗургууд:\n" + "\n".join([
+                        image_info = "\n\nЗургууд:\n" + "\n".join([
                             f"- {img['alt']}: {img['url']}" if img['alt'] else f"- {img['url']}"
                             for img in page['images'][:3]  # Limit to 3 images
                         ])
                 
                     relevant_pages.append(
-                        f"📄 {result['title']}\n"
-                        f"🔗 {result['url']}\n"
-                        f"📝 {result['snippet']}\n"
-                        f"🎯 Нарийвчлал: {result['relevance_score']}/15\n"
+                        f"📄 **{result['title']}**\n"
+                        f"🔗 {result['url']}\n\n"
+                        f"{result['snippet']}\n"
                         f"{image_info}\n"
                     )
-            doc_context = "\n".join(relevant_pages)
+            
+            # Return only document content without AI processing
+            doc_response = "\n---\n\n".join(relevant_pages)
+            
+            # Store in memory  
+            if ai_context.conv_id not in conversation_memory:
+                conversation_memory[ai_context.conv_id] = []
+            
+            conversation_memory[ai_context.conv_id].append({"role": "user", "content": ai_context.user_message})
+            conversation_memory[ai_context.conv_id].append({"role": "assistant", "content": doc_response})
+            
+            # Keep only last 10 messages for better context
+            if len(conversation_memory[ai_context.conv_id]) > 10:
+                conversation_memory[ai_context.conv_id] = conversation_memory[ai_context.conv_id][-10:]
+            
+            ai_context.ai_response = doc_response
+            ai_context.found_in_docs = found_in_docs
+            return doc_response
     
-    # Step 2: Adaptive system prompt based on search results
-    if found_in_docs:
-        personality = """Та Cloud.mn-ийн баримт бичгийн мэргэжлийн туслах. 
-        Баримт бичгийн мэдээллийг ашиглан МАШ НАРИЙВЧЛАЛТАЙ, ТОВЧ, ТОДОРХОЙ хариулт өгнө.
-        Хариултаа бүтэцтэй байлгаж, хэрэглэгчид шууд хэрэглэж болох зааварчилгаа өгнө."""
-    else:
-        personality = """Та Cloud.mn-ийн ухаалаг AI туслах. Баримт бичигт олдохгүй асуултуудад 
+    # Step 2: If no documents found, use AI response (existing logic)
+    personality = """Та Cloud.mn-ийн ухаалаг AI туслах. Баримт бичигт олдохгүй асуултуудад 
         өөрийн мэдлэгээрээ хариулж, шаардлагатай бол дэмжлэгийн багт уламжлана."""
-    
-    # Prepare documentation section to avoid backslash in f-string
-    doc_section = 'БАРИМТ БИЧГИЙН МЭДЭЭЛЭЛ:\n' + doc_context if doc_context else ''
     
     system_content = f"""{personality}
     
 ҮНДСЭН ЗАРЧИМ: Монгол хэлээр тодорхой, практик хариулт өгнө.
 
 Одоогийн нөхцөл байдал:
-- Баримт бичгээс олдсон: {'Тийм' if found_in_docs else 'Үгүй'}
+- Баримт бичгээс олдсон: Үгүй
 - Харилцлагын түүх: {context_info["conversation_length"]} мессэж
 - Контекстын хэмжээ: {len(context_info['full_conversation'])} тэмдэгт
 
 ХАРИУЛТЫН ЗАГВАР:
-1. Хариултыг {200 if found_in_docs else 150} үгээс багагүй байлгах
+1. Хариултыг 150 үгээс багагүй байлгах
 2. Практик алхам алхмаар зааварчилгаа өгөх  
 3. Холбогдох линк болон дэмжлэг санал болгох
 4. Техникийн нэр томъёог монгол хэлээр тайлбарлах
-
-{doc_section}
     """
     
     # Step 3: Build conversation with smart context management
     messages = [{"role": "system", "content": system_content}]
     
     # Add relevant conversation history
-    history_limit = 3 if found_in_docs else 5
+    history_limit = 5
     recent_messages = []
     for msg in context_info["user_messages"][-history_limit:]:
         if msg != ai_context.user_message:
@@ -309,8 +316,8 @@ def get_enhanced_ai_response(ai_context: AIContext):
         response = client.chat.completions.create(
             model="gpt-4",
             messages=messages,
-            max_tokens=800 if found_in_docs else 600,
-            temperature=0.4 if found_in_docs else 0.6
+            max_tokens=600,
+            temperature=0.6
         )
         
         ai_response = response.choices[0].message.content
@@ -965,7 +972,7 @@ def chatwoot_webhook():
 
     elif text.lower() in ["баяртай", "goodbye", "баай", "дууслаа"]:
         response = f"👋 Баяртай {contact_name}! Дараа дахин тусламж хэрэгтэй бол эргээд ирээрэй!"
-        send_to_chatwoot(conv_id, response)
+                send_to_chatwoot(conv_id, response)
         mark_conversation_resolved(conv_id)
 
     # Handle email confirmation workflows
@@ -980,7 +987,7 @@ def chatwoot_webhook():
             # Handle as normal conversation
             process_conversational_message(conv_id, text, contact_name)
             
-    else:
+            else:
         # Check if this is a response to confirmation or email request
         memory = conversation_memory.get(conv_id, [])
         
@@ -988,7 +995,7 @@ def chatwoot_webhook():
             handle_confirmation_response(conv_id, text, contact_name)
         elif memory and "waiting_for_email" in memory[-1].get("content", ""):
             handle_email_response(conv_id, text, contact_name)
-        else:
+                else:
             # Normal conversational interaction
             process_conversational_message(conv_id, text, contact_name)
 
@@ -1061,14 +1068,15 @@ def process_conversational_message(conv_id: int, text: str, contact_name: str):
                 if service_suggestions:
                     send_to_chatwoot(conv_id, service_suggestions)
                     
-        elif recommended_action == "mark_resolved" and overall.get("user_satisfaction") == "high":
-            # Offer to close if user seems satisfied
-            close_suggestion = f"""
-✅ Таны асуулт хангалттай хариулагдсан бололтой!
-
-Өөр асуулт байвал чөлөөтэй асуугаарай, эсвэл харилцлагыг дуусгахыг хүсвэл "баяртай" гэж бичнэ үү. 😊
-            """
-            send_to_chatwoot(conv_id, close_suggestion)
+        # Remove the mark_resolved case that sends automatic satisfaction messages
+        # elif recommended_action == "mark_resolved" and overall.get("user_satisfaction") == "high":
+        #     # Offer to close if user seems satisfied
+        #     close_suggestion = f"""
+        # ✅ Таны асуулт хангалттай хариулагдсан бололтой!
+        # 
+        # Өөр асуулт байвал чөлөөтэй асуугаарай, эсвэл харилцлагыг дуусгахыг хүсвэл "баяртай" гэж бичнэ үү. 😊
+        #     """
+        #     send_to_chatwoot(conv_id, close_suggestion)
 
 def handle_confirmation_response(conv_id: int, text: str, contact_name: str):
     """Handle user response to Teams escalation confirmation"""
@@ -1079,9 +1087,9 @@ def handle_confirmation_response(conv_id: int, text: str, contact_name: str):
     
     try:
         # Use AI to understand the response
-        confirmation_response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
+            confirmation_response = client.chat.completions.create(
+                model="gpt-4",
+                messages=[
                 {
                     "role": "system",
                     "content": "Хэрэглэгчийн хариултыг дүгнэж зөвшөөрөл эсвэл татгалзлыг тодорхойл. 'yes' эсвэл 'no' гэж хариулна уу."
@@ -1090,14 +1098,14 @@ def handle_confirmation_response(conv_id: int, text: str, contact_name: str):
                     "role": "user",
                     "content": f"Хэрэглэгчийн хариулт: {text}\n\nЭнэ зөвшөөрөл мөн үү?"
                 }
-            ],
-            max_tokens=10,
+                ],
+                max_tokens=10,
             temperature=0.2
-        )
-        
-        is_confirmed = confirmation_response.choices[0].message.content.strip().lower() == "yes"
-        
-        if is_confirmed:
+            )
+            
+            is_confirmed = confirmation_response.choices[0].message.content.strip().lower() == "yes"
+            
+            if is_confirmed:
             # Request email
             email_request = f"""
 ✅ Баярлалаа {contact_name}!
@@ -1107,12 +1115,12 @@ def handle_confirmation_response(conv_id: int, text: str, contact_name: str):
 📧 **Жишээ:** example@gmail.com
 
 💡 Хэрэв email өгөхгүй бол "цуцлах" гэж бичнэ үү.
-            """
-            send_to_chatwoot(conv_id, email_request)
-            
+                """
+                send_to_chatwoot(conv_id, email_request)
+                
             # Update conversation state
-            conversation_memory[conv_id].append({"role": "assistant", "content": "waiting_for_email"})
-        else:
+                conversation_memory[conv_id].append({"role": "assistant", "content": "waiting_for_email"})
+            else:
             send_to_chatwoot(conv_id, f"✅ Ойлголоо {contact_name}. Өөр асуулт байвал чөлөөтэй асуугаарай!")
             # Clear confirmation state
             conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] 
@@ -1125,31 +1133,31 @@ def handle_confirmation_response(conv_id: int, text: str, contact_name: str):
 def handle_email_response(conv_id: int, text: str, contact_name: str):
     """Handle user email input"""
     
-    import re
+            import re
     
     # Validate email format
-    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    
-    if re.match(email_pattern, text.strip()):
-        user_email = text.strip()
-        
+            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+            
+            if re.match(email_pattern, text.strip()):
+                user_email = text.strip()
+                
         # Get the conversation context for Teams
         memory = conversation_memory.get(conv_id, [])
-        
+                
         # Find the original problem context
         original_question = ""
         ai_response = ""
         
         # Look for the AI response before email collection started
-        for i, msg in enumerate(memory):
+                for i, msg in enumerate(memory):
             if "waiting_for_email" in msg.get("content", ""):
                 # Find previous user and AI messages
-                if i >= 2:
+                        if i >= 2:
                     ai_response = memory[i-2].get("content", "")
                     if i >= 3:
                         original_question = memory[i-3].get("content", "")
                         break
-        
+                
         # Create enhanced AI context for Teams notification
         ai_context = AIContext(conv_id, original_question or "Email холбогдох хүсэлт")
         ai_context.ai_response = ai_response
