@@ -982,10 +982,10 @@ def chatwoot_webhook():
             send_to_chatwoot(conv_id, "✅ Ойлголоо. Харилцлагыг үргэлжлүүлцгээе.")
             # Clear waiting states
             conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] 
-                                         if not any(state in msg.get("content", "") for state in ["pending_confirmation", "waiting_for_email"])]
-        else:
-            # Handle as normal conversation
-            process_conversational_message(conv_id, text, contact_name)
+            if not any(state in msg.get("content", "") for state in ["pending_confirmation", "waiting_for_email"])]
+                else:
+                # Handle as normal conversation
+                process_conversational_message(conv_id, text, contact_name)
             
         else:
         # Check if this is a response to confirmation or email request
