@@ -22,6 +22,7 @@ ACCOUNT_ID           = os.getenv("ACCOUNT_ID")
 CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com")
 OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
 AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true"
+TEAMS_WEBHOOK_URL    = os.getenv("TEAMS_WEBHOOK_URL")  # Microsoft Teams webhook URL
 
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -359,6 +360,51 @@ def mark_conversation_resolved(conv_id: int):
         return False
 
 
+# —— Microsoft Teams Integration —— #
+def send_to_teams(user_message: str, contact_name: str = "Хэрэглэгч", conv_id: int = None):
+    """Send user question to Microsoft Teams"""
+    if not TEAMS_WEBHOOK_URL:
+        logging.warning("Teams webhook URL not configured")
+        return False
+    
+    # Create Teams message card
+    teams_message = {
+        "@type": "MessageCard",
+        "@context": "http://schema.org/extensions",
+        "themeColor": "0076D7",
+        "summary": "Шинэ асуулт Cloud.mn-ээс",
+        "sections": [{
+            "activityTitle": "🤖 Cloud.mn AI Assistant",
+            "activitySubtitle": f"Хэрэглэгчийн асуулт - {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "facts": [
+                {
+                    "name": "Хэрэглэгч:",
+                    "value": contact_name
+                },
+                {
+                    "name": "Харилцан яриа ID:",
+                    "value": str(conv_id) if conv_id else "Тодорхойгүй"
+                },
+                {
+                    "name": "Асуулт:",
+                    "value": user_message[:500] + "..." if len(user_message) > 500 else user_message
+                }
+            ],
+            "markdown": True
+        }]
+    }
+    
+    try:
+        headers = {"Content-Type": "application/json"}
+        resp = requests.post(TEAMS_WEBHOOK_URL, json=teams_message, headers=headers, timeout=10)
+        resp.raise_for_status()
+        logging.info(f"Message sent to Teams for conversation {conv_id}")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to send message to Teams: {e}")
+        return False
+
+
 # —— API Endpoints —— #
 @app.route("/api/scrape", methods=["POST"])
 def api_scrape():
@@ -396,6 +442,9 @@ def chatwoot_webhook():
     contact_name = contact.get("name", "Хэрэглэгч")
     
     logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
+    
+    # Send user question to Microsoft Teams
+    send_to_teams(text, contact_name, conv_id)
     
     # General AI conversation only
     ai_response = get_ai_response(text, conv_id, crawled_data)
@@ -511,7 +560,8 @@ def health_check():
             "root_url": ROOT_URL,
             "auto_crawl_enabled": AUTO_CRAWL_ON_START,
             "openai_configured": client is not None,
-            "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID)
+            "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID),
+            "teams_configured": bool(TEAMS_WEBHOOK_URL)
         }
     })
 
