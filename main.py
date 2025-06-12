@@ -159,7 +159,11 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     """Enhanced AI response with better context awareness"""
     
     if not client:
-        return {"response": "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу.", "needs_human": True}
+        return {
+            "response": "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу.", 
+            "needs_human": True,
+            "human_requested": False
+        }
     
     # Get conversation history
     history = conversation_memory.get(conversation_id, [])
@@ -188,9 +192,18 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     2. Хэрэв ойлгомжгүй бол тодорхой асууна уу
     3. Хариултаа бүтэцтэй, цэгцтэй байлгаарай
     4. Техникийн нэр томъёог монгол хэлээр тайлбарлаарай
+    5. Хэрэв хэрэглэгч хүний туслалцаа хүссэн бол (дэмжлэгийн баг, хүмүүс, туслалцаа гэх мэт) шууд "HUMAN_REQUESTED:" гэж эхлээрэй
     
-    ЧУХАЛ: Хэрэв та асуултад хариулж чадахгүй эсвэл мэдээлэл хангалтгүй бол хариултынхаа эхэнд "NEEDS_HUMAN:" гэж бичээд хариулаарай.
-    Жишээ: "NEEDS_HUMAN: Уучлаарай, энэ асуултын талаар тодорхой мэдээлэл олдсонгүй..."
+    ЧУХАЛ: 
+    - Зөвхөн техникийн асуулт, нарийн төвөгтэй асуулт эсвэл та мэдэхгүй зүйлийн хувьд "NEEDS_HUMAN:" ашиглана уу
+    - Хэрэглэгч хүний туслалцаа шууд хүссэн бол "HUMAN_REQUESTED:" ашиглана уу
+    - Энгийн асуултад хэвийн хариулна уу
+    
+    Жишээ:
+    - "Дэмжлэгийн багтай холбогдмоор байна" → "HUMAN_REQUESTED: Танд дэмжлэгийн багтай холбогдох боломжийг олгож байна..."
+    - "Project owner солиулмаар байна" → "HUMAN_REQUESTED: Танд дэмжлэгийн багтай холбогдох боломжийг олгож байна..."
+    - "Docker-ийн тохиргоо яаж хийх вэ?" → Хэвийн хариулт өгнө
+    - "Энэ алдааны шийдлийг мэдэхгүй байна" → "NEEDS_HUMAN: Энэ асуултын талаар..."
     
     Боломжит командууд:
     - crawl: Бүх сайтыг шүүрдэх
@@ -226,11 +239,16 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         
         ai_response = response.choices[0].message.content
         
-        # Check if AI indicates it needs human help
+        # Check if AI indicates it needs human help or user requested human
         needs_human = ai_response.startswith("NEEDS_HUMAN:")
+        human_requested = ai_response.startswith("HUMAN_REQUESTED:")
+        
         if needs_human:
             # Remove the NEEDS_HUMAN: prefix from the response
             ai_response = ai_response.replace("NEEDS_HUMAN:", "").strip()
+        elif human_requested:
+            # Remove the HUMAN_REQUESTED: prefix from the response
+            ai_response = ai_response.replace("HUMAN_REQUESTED:", "").strip()
         
         # Store in memory
         if conversation_id not in conversation_memory:
@@ -243,12 +261,20 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         if len(conversation_memory[conversation_id]) > 8:
             conversation_memory[conversation_id] = conversation_memory[conversation_id][-8:]
             
-        return {"response": ai_response, "needs_human": needs_human}
+        return {
+            "response": ai_response, 
+            "needs_human": needs_human or human_requested,
+            "human_requested": human_requested
+        }
         
     except Exception as e:
         logging.error(f"OpenAI API алдаа: {e}")
         error_response = f"🔧 AI-тай холбогдоход саад гарлаа. Та дараах аргуудаар тусламж авч болно:\n• 'help' командыг ашиглана уу\n• 'crawl' эсвэл 'search' командуудыг туршина уу\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
-        return {"response": error_response, "needs_human": True}
+        return {
+            "response": error_response, 
+            "needs_human": True,
+            "human_requested": False
+        }
 
 def search_in_crawled_data(query: str, max_results: int = 3):
     """Enhanced search through crawled data with better relevance scoring"""
@@ -510,6 +536,7 @@ def chatwoot_webhook():
     ai_result = get_ai_response(text, conv_id, crawled_data)
     ai_response = ai_result["response"]
     needs_human = ai_result["needs_human"]
+    human_requested = ai_result.get("human_requested", False)
     
     # Send AI response to chatwoot
     send_to_chatwoot(conv_id, ai_response)
@@ -518,11 +545,18 @@ def chatwoot_webhook():
     if needs_human and ENABLE_TEAMS_FALLBACK:
         logging.info(f"AI needs human help for conversation {conv_id}, sending Teams notification")
         
-        # Add fallback message to chatwoot
-        fallback_message = (
-            "🔔 Таны асуултыг дэмжлэгийн баг руу илгээлээ. "
-            "Манай баг удахгүй танд хариулах болно."
-        )
+        # Choose appropriate fallback message
+        if human_requested:
+            fallback_message = (
+                "✅ Таны хүсэлтийг дэмжлэгийн багт илгээлээ. "
+                "Тэд удахгүй танд хариулах болно."
+            )
+        else:
+            fallback_message = (
+                "🔔 Таны асуулт нарийн туслалцаа шаардаж байна. "
+                "Дэмжлэгийн багт илгээж байна."
+            )
+        
         send_to_chatwoot(conv_id, fallback_message)
         
         # Send notification to Teams
