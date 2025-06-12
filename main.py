@@ -8,6 +8,11 @@ from urllib.parse import urljoin, urlparse
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
 from datetime import datetime
+import smtplib
+import random
+import string
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -27,6 +32,14 @@ AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true
 TEAMS_WEBHOOK_URL    = os.getenv("TEAMS_WEBHOOK_URL")
 ENABLE_TEAMS_FALLBACK = os.getenv("ENABLE_TEAMS_FALLBACK", "true").lower() == "true"
 
+# SMTP configuration for email verification
+SMTP_SERVER          = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT            = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME        = os.getenv("SENDER_EMAIL")
+SMTP_PASSWORD        = os.getenv("SENDER_PASSWORD")
+SMTP_FROM_EMAIL      = os.getenv("SENDER_EMAIL")
+ENABLE_EMAIL_VERIFICATION = os.getenv("ENABLE_EMAIL_VERIFICATION", "true").lower() == "true"
+
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -34,6 +47,10 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 conversation_memory = {}
 crawled_data = []
 crawl_status = {"status": "not_started", "message": "Crawling has not started yet"}
+
+# Email verification and support request storage
+email_verification_codes = {}  # {conv_id: {"email": email, "code": code, "timestamp": timestamp}}
+pending_support_requests = {}  # {conv_id: {"email": email, "question": question, "details": details, "verified": bool}}
 
 # —— Crawl & Scrape —— #
 def crawl_and_scrape(start_url: str):
@@ -492,6 +509,164 @@ def send_to_teams(user_email: str, user_name: str, question: str, conversation_i
         logging.error(f"Failed to send Teams notification: {e}")
         return False
 
+def generate_verification_code():
+    """Generate 6-digit verification code"""
+    return ''.join(random.choices(string.digits, k=6))
+
+def send_verification_email(email: str, code: str, user_name: str = "Хэрэглэгч"):
+    """Send email verification code via SMTP"""
+    if not all([SMTP_USERNAME, SMTP_PASSWORD, SMTP_FROM_EMAIL]):
+        logging.error("SMTP configuration incomplete")
+        return False
+    
+    try:
+        # Create message
+        msg = MIMEMultipart()
+        msg['From'] = SMTP_FROM_EMAIL
+        msg['To'] = email
+        msg['Subject'] = "Cloud.mn - Email баталгаажуулах код"
+        
+        # Email body
+        body = f"""
+Сайн байна уу {user_name}!
+
+Таны Cloud.mn дэмжлэгийн хүсэлтийг баталгаажуулахын тулд доорх кодыг оруулна уу:
+
+🔐 Баталгаажуулах код: {code}
+
+Энэ код 10 минутын дараа хүчингүй болно.
+
+Хэрэв та энэ хүсэлтийг илгээгээгүй бол Cloud mn рүү мэдэгдэнэ үү..
+
+Баярлалаа,
+Cloud.mn баг
+        """
+        
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        
+        # Send email
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        text = msg.as_string()
+        server.sendmail(SMTP_FROM_EMAIL, email, text)
+        server.quit()
+        
+        logging.info(f"Verification email sent to {email}")
+        return True
+        
+    except Exception as e:
+        logging.error(f"Failed to send verification email: {e}")
+        return False
+
+def start_email_verification(conv_id: int, email: str, user_name: str, original_question: str):
+    """Start email verification process"""
+    global email_verification_codes, pending_support_requests
+    
+    # Generate verification code
+    code = generate_verification_code()
+    timestamp = datetime.now()
+    
+    # Store verification data
+    email_verification_codes[conv_id] = {
+        "email": email,
+        "code": code,
+        "timestamp": timestamp,
+        "user_name": user_name
+    }
+    
+    # Store pending support request
+    pending_support_requests[conv_id] = {
+        "email": email,
+        "question": original_question,
+        "details": "",
+        "verified": False,
+        "user_name": user_name
+    }
+    
+    # Send verification email
+    if send_verification_email(email, code, user_name):
+        return True
+    else:
+        # Clean up if email failed
+        if conv_id in email_verification_codes:
+            del email_verification_codes[conv_id]
+        if conv_id in pending_support_requests:
+            del pending_support_requests[conv_id]
+        return False
+
+def verify_email_code(conv_id: int, submitted_code: str):
+    """Verify submitted email code"""
+    global email_verification_codes, pending_support_requests
+    
+    if conv_id not in email_verification_codes:
+        return {"success": False, "message": "Баталгаажуулах код олдсонгүй. Дахин эхлүүлнэ үү."}
+    
+    verification_data = email_verification_codes[conv_id]
+    
+    # Check if code expired (10 minutes)
+    time_diff = datetime.now() - verification_data["timestamp"]
+    if time_diff.total_seconds() > 600:  # 10 minutes
+        del email_verification_codes[conv_id]
+        if conv_id in pending_support_requests:
+            del pending_support_requests[conv_id]
+        return {"success": False, "message": "Баталгаажуулах код хугацаа дууссан. Дахин эхлүүлнэ үү."}
+    
+    # Check code
+    if submitted_code.strip() == verification_data["code"]:
+        # Mark as verified
+        if conv_id in pending_support_requests:
+            pending_support_requests[conv_id]["verified"] = True
+        
+        # Clean up verification code
+        del email_verification_codes[conv_id]
+        
+        return {"success": True, "message": "Email амжилттай баталгаажлаа!"}
+    else:
+        return {"success": False, "message": "Буруу код байна. Дахин оролдоно уу."}
+
+def collect_support_details(conv_id: int, details: str):
+    """Collect additional details for support request"""
+    global pending_support_requests
+    
+    if conv_id not in pending_support_requests:
+        return {"success": False, "message": "Дэмжлэгийн хүсэлт олдсонгүй."}
+    
+    if not pending_support_requests[conv_id]["verified"]:
+        return {"success": False, "message": "Эхлээд email хаягаа баталгаажуулна уу."}
+    
+    # Store details
+    pending_support_requests[conv_id]["details"] = details
+    
+    return {"success": True, "message": "Дэлгэрэнгүй мэдээлэл хадгалагдлаа!"}
+
+def finalize_support_request(conv_id: int):
+    """Send final support request to Teams"""
+    global pending_support_requests
+    
+    if conv_id not in pending_support_requests:
+        return {"success": False, "message": "Дэмжлэгийн хүсэлт олдсонгүй."}
+    
+    request_data = pending_support_requests[conv_id]
+    
+    if not request_data["verified"]:
+        return {"success": False, "message": "Email баталгаажуулаагүй байна."}
+    
+    # Send to Teams
+    success = send_to_teams(
+        user_email=request_data["email"],
+        user_name=request_data["user_name"],
+        question=f"{request_data['question']}\n\nДэлгэрэнгүй: {request_data['details']}",
+        conversation_id=conv_id
+    )
+    
+    if success:
+        # Clean up
+        del pending_support_requests[conv_id]
+        return {"success": True, "message": "Дэмжлэгийн хүсэлт амжилттай илгээгдлээ!"}
+    else:
+        return {"success": False, "message": "Teams-рүү илгээхэд алдаа гарлаа."}
+
 
 # —— API Endpoints —— #
 @app.route("/api/scrape", methods=["POST"])
@@ -515,8 +690,8 @@ def api_crawl():
 # —— Enhanced Chatwoot Webhook —— #
 @app.route("/webhook/chatwoot", methods=["POST"])
 def chatwoot_webhook():
-    """Enhanced webhook with AI integration and Teams fallback"""
-    global crawled_data, crawl_status  # Move global declaration to the top
+    """Enhanced webhook with AI integration, email verification and Teams fallback"""
+    global crawled_data, crawl_status, email_verification_codes, pending_support_requests
     
     data = request.json or {}
     
@@ -532,7 +707,41 @@ def chatwoot_webhook():
     
     logging.info(f"Received message from {contact_name} ({contact_email}) in conversation {conv_id}: {text}")
     
-    # General AI conversation only
+    # Check if user is in email verification process
+    if conv_id in email_verification_codes:
+        # User is submitting verification code
+        result = verify_email_code(conv_id, text)
+        send_to_chatwoot(conv_id, result["message"])
+        
+        if result["success"]:
+            # Ask for more details
+            send_to_chatwoot(conv_id, 
+                "✅ Email баталгаажлаа! Одоо асуудлынхаа талаар дэлгэрэнгүй мэдээлэл өгнө үү. "
+                "Жишээ нь: ямар алдаа гарч байна, хэзээнээс эхэлсэн, юу хийх гэж байсан гэх мэт."
+            )
+        
+        return jsonify({"status": "success"}), 200
+    
+    # Check if user is providing support details
+    if conv_id in pending_support_requests and pending_support_requests[conv_id]["verified"] and not pending_support_requests[conv_id]["details"]:
+        # User is providing additional details
+        result = collect_support_details(conv_id, text)
+        send_to_chatwoot(conv_id, result["message"])
+        
+        if result["success"]:
+            # Finalize and send to Teams
+            final_result = finalize_support_request(conv_id)
+            send_to_chatwoot(conv_id, final_result["message"])
+            
+            if final_result["success"]:
+                send_to_chatwoot(conv_id, 
+                    "🎯 Таны дэмжлэгийн хүсэлт баталгаажсан email хаяг болон дэлгэрэнгүй "
+                    "мэдээллийн хамт манай багт илгээгдлээ. Тэд удахгүй танд хариулах болно."
+                )
+        
+        return jsonify({"status": "success"}), 200
+    
+    # Regular AI conversation
     ai_result = get_ai_response(text, conv_id, crawled_data)
     ai_response = ai_result["response"]
     needs_human = ai_result["needs_human"]
@@ -541,25 +750,31 @@ def chatwoot_webhook():
     # Send AI response to chatwoot
     send_to_chatwoot(conv_id, ai_response)
     
-    # If AI needs human help, send notification to Teams
-    if needs_human and ENABLE_TEAMS_FALLBACK:
-        logging.info(f"AI needs human help for conversation {conv_id}, sending Teams notification")
+    # If AI needs human help, start email verification process
+    if needs_human and ENABLE_TEAMS_FALLBACK and ENABLE_EMAIL_VERIFICATION:
+        logging.info(f"Starting email verification process for conversation {conv_id}")
         
-        # Choose appropriate fallback message
-        if human_requested:
-            fallback_message = (
-                "✅ Таны хүсэлтийг дэмжлэгийн багт илгээлээ. "
-                "Тэд удахгүй танд хариулах болно."
+        if not contact_email:
+            send_to_chatwoot(conv_id, 
+                "⚠️ Дэмжлэгийн багт хүсэлт илгээхийн тулд та эхлээд профайлдаа email хаяг оруулна уу."
             )
+            return jsonify({"status": "success"}), 200
+        
+        # Start email verification
+        if start_email_verification(conv_id, contact_email, contact_name, text):
+            verification_message = (
+                f"📧 Таны email хаяг ({contact_email}) руу баталгаажуулах код илгээлээ. "
+                f"Кодыг энд оруулж дэмжлэгийн хүсэлтээ баталгаажуулна уу.\n\n"
+                f"💡 Код 10 минутын дараа хүчингүй болно."
+            )
+            send_to_chatwoot(conv_id, verification_message)
         else:
-            fallback_message = (
-                "🔔 Таны асуулт нарийн туслалцаа шаардаж байна. "
-                "Дэмжлэгийн багт илгээж байна."
+            send_to_chatwoot(conv_id, 
+                "❌ Email илгээхэд алдаа гарлаа. SMTP тохиргоог шалгана уу эсвэл админтай холбогдоно уу."
             )
-        
-        send_to_chatwoot(conv_id, fallback_message)
-        
-        # Send notification to Teams
+    
+    elif needs_human and ENABLE_TEAMS_FALLBACK and not ENABLE_EMAIL_VERIFICATION:
+        # Direct Teams notification without email verification (fallback)
         if contact_email:
             send_to_teams(
                 user_email=contact_email,
@@ -567,8 +782,20 @@ def chatwoot_webhook():
                 question=text,
                 conversation_id=conv_id
             )
+            
+            fallback_message = (
+                "✅ Таны хүсэлтийг дэмжлэгийн багт илгээлээ. "
+                "Тэд удахгүй танд хариулах болно."
+            ) if human_requested else (
+                "🔔 Таны асуулт нарийн туслалцаа шаардаж байна. "
+                "Дэмжлэгийн багт илгээж байна."
+            )
+            
+            send_to_chatwoot(conv_id, fallback_message)
         else:
-            logging.warning(f"No email found for contact in conversation {conv_id}, cannot send Teams notification")
+            send_to_chatwoot(conv_id, 
+                "⚠️ Дэмжлэгийн багт хүсэлт илгээхийн тулд профайлдаа email хаяг оруулна уу."
+            )
 
     return jsonify({"status": "success"}), 200
 
@@ -676,13 +903,17 @@ def health_check():
         "crawl_status": crawl_status,
         "crawled_pages": len(crawled_data),
         "active_conversations": len(conversation_memory),
+        "pending_verifications": len(email_verification_codes),
+        "pending_support_requests": len(pending_support_requests),
         "config": {
             "root_url": ROOT_URL,
             "auto_crawl_enabled": AUTO_CRAWL_ON_START,
             "openai_configured": client is not None,
             "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID),
             "teams_configured": bool(TEAMS_WEBHOOK_URL),
-            "teams_fallback_enabled": ENABLE_TEAMS_FALLBACK
+            "teams_fallback_enabled": ENABLE_TEAMS_FALLBACK,
+            "smtp_configured": bool(SMTP_USERNAME and SMTP_PASSWORD and SMTP_FROM_EMAIL),
+            "email_verification_enabled": ENABLE_EMAIL_VERIFICATION
         }
     })
 
