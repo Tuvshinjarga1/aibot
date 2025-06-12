@@ -8,11 +8,6 @@ from urllib.parse import urljoin, urlparse
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
 from datetime import datetime
-import smtplib
-import random
-import string
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -28,18 +23,6 @@ CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com"
 OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
 AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true"
 
-# Microsoft Teams webhook config
-TEAMS_WEBHOOK_URL    = os.getenv("TEAMS_WEBHOOK_URL")
-ENABLE_TEAMS_FALLBACK = os.getenv("ENABLE_TEAMS_FALLBACK", "true").lower() == "true"
-
-# SMTP configuration for email verification
-SMTP_SERVER          = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT            = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USERNAME        = os.getenv("SENDER_EMAIL")
-SMTP_PASSWORD        = os.getenv("SENDER_PASSWORD")
-SMTP_FROM_EMAIL      = os.getenv("SENDER_EMAIL")
-ENABLE_EMAIL_VERIFICATION = os.getenv("ENABLE_EMAIL_VERIFICATION", "true").lower() == "true"
-
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -47,10 +30,6 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 conversation_memory = {}
 crawled_data = []
 crawl_status = {"status": "not_started", "message": "Crawling has not started yet"}
-
-# Email verification and support request storage
-email_verification_codes = {}  # {conv_id: {"email": email, "code": code, "timestamp": timestamp}}
-pending_support_requests = {}  # {conv_id: {"email": email, "question": question, "details": details, "verified": bool}}
 
 # —— Crawl & Scrape —— #
 def crawl_and_scrape(start_url: str):
@@ -176,11 +155,7 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     """Enhanced AI response with better context awareness"""
     
     if not client:
-        return {
-            "response": "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу.", 
-            "needs_human": True,
-            "human_requested": False
-        }
+        return "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
     
     # Get conversation history
     history = conversation_memory.get(conversation_id, [])
@@ -209,24 +184,8 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     2. Хэрэв ойлгомжгүй бол тодорхой асууна уу
     3. Хариултаа бүтэцтэй, цэгцтэй байлгаарай
     4. Техникийн нэр томъёог монгол хэлээр тайлбарлаарай
-    5. Хэрэв хэрэглэгч хүний туслалцаа хүссэн бол (дэмжлэгийн баг, хүмүүс, туслалцаа гэх мэт) шууд "HUMAN_REQUESTED:" гэж эхлээрэй
     
-    ЧУХАЛ: 
-    - Зөвхөн техникийн асуулт, нарийн төвөгтэй асуулт эсвэл та мэдэхгүй зүйлийн хувьд "NEEDS_HUMAN:" ашиглана уу
-    - Хэрэглэгч хүний туслалцаа шууд хүссэн бол "HUMAN_REQUESTED:" ашиглана уу
-    - Энгийн асуултад хэвийн хариулна уу
-    
-    Жишээ:
-    - "Дэмжлэгийн багтай холбогдмоор байна" → "HUMAN_REQUESTED: Танд дэмжлэгийн багтай холбогдох боломжийг олгож байна..."
-    - "Project owner солиулмаар байна" → "HUMAN_REQUESTED: Танд дэмжлэгийн багтай холбогдох боломжийг олгож байна..."
-    - "Docker-ийн тохиргоо яаж хийх вэ?" → Хэвийн хариулт өгнө
-    - "Энэ алдааны шийдлийг мэдэхгүй байна" → "NEEDS_HUMAN: Энэ асуултын талаар..."
-    
-    Боломжит командууд:
-    - crawl: Бүх сайтыг шүүрдэх
-    - scrape <URL>: Тодорхой хуудсыг шүүрдэх  
-    - help: Тусламж харуулах
-    - search <асуулт>: Мэдээлэл хайх"""
+    Та хэрэглэгчийн асуултад шууд хариулж, тусламж үзүүлээрэй. Ямар нэгэн тусгай команд шаардахгүй."""
     
     if context:
         system_content += f"\n\nКонтекст мэдээлэл:\n{context}"
@@ -256,17 +215,6 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         
         ai_response = response.choices[0].message.content
         
-        # Check if AI indicates it needs human help or user requested human
-        needs_human = ai_response.startswith("NEEDS_HUMAN:")
-        human_requested = ai_response.startswith("HUMAN_REQUESTED:")
-        
-        if needs_human:
-            # Remove the NEEDS_HUMAN: prefix from the response
-            ai_response = ai_response.replace("NEEDS_HUMAN:", "").strip()
-        elif human_requested:
-            # Remove the HUMAN_REQUESTED: prefix from the response
-            ai_response = ai_response.replace("HUMAN_REQUESTED:", "").strip()
-        
         # Store in memory
         if conversation_id not in conversation_memory:
             conversation_memory[conversation_id] = []
@@ -278,20 +226,11 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         if len(conversation_memory[conversation_id]) > 8:
             conversation_memory[conversation_id] = conversation_memory[conversation_id][-8:]
             
-        return {
-            "response": ai_response, 
-            "needs_human": needs_human or human_requested,
-            "human_requested": human_requested
-        }
+        return ai_response
         
     except Exception as e:
         logging.error(f"OpenAI API алдаа: {e}")
-        error_response = f"🔧 AI-тай холбогдоход саад гарлаа. Та дараах аргуудаар тусламж авч болно:\n• 'help' командыг ашиглана уу\n• 'crawl' эсвэл 'search' командуудыг туршина уу\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
-        return {
-            "response": error_response, 
-            "needs_human": True,
-            "human_requested": False
-        }
+        return f"🔧 AI-тай холбогдоход саад гарлаа. Дахин оролдоно уу эсвэл админтай холбогдоно уу.\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
 
 def search_in_crawled_data(query: str, max_results: int = 3):
     """Enhanced search through crawled data with better relevance scoring"""
@@ -419,254 +358,6 @@ def mark_conversation_resolved(conv_id: int):
         logging.error(f"Failed to mark conversation as resolved: {e}")
         return False
 
-def send_to_teams(user_email: str, user_name: str, question: str, conversation_id: int, conversation_url: str = None):
-    """Send notification to Microsoft Teams when AI cannot answer"""
-    if not TEAMS_WEBHOOK_URL or not ENABLE_TEAMS_FALLBACK:
-        logging.warning("Teams webhook not configured or disabled")
-        return False
-    
-    # Create conversation URL if not provided
-    if not conversation_url:
-        conversation_url = f"{CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conversation_id}"
-    
-    # Create Teams adaptive card
-    teams_payload = {
-        "type": "message",
-        "attachments": [
-            {
-                "contentType": "application/vnd.microsoft.cards.adaptive",
-                "content": {
-                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                    "type": "AdaptiveCard",
-                    "version": "1.3",
-                    "body": [
-                        {
-                            "type": "TextBlock",
-                            "text": "🚨 AI Туслах Хариулж Чадсангүй",
-                            "weight": "Bolder",
-                            "size": "Large",
-                            "color": "Attention"
-                        },
-                        {
-                            "type": "FactSet",
-                            "facts": [
-                                {
-                                    "title": "👤 Хэрэглэгч:",
-                                    "value": f"{user_name} ({user_email})"
-                                },
-                                {
-                                    "title": "💬 Харилцаа ID:",
-                                    "value": str(conversation_id)
-                                },
-                                {
-                                    "title": "⏰ Цаг:",
-                                    "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                }
-                            ]
-                        },
-                        {
-                            "type": "TextBlock",
-                            "text": "❓ **Асуулт:**",
-                            "weight": "Bolder",
-                            "size": "Medium"
-                        },
-                        {
-                            "type": "TextBlock",
-                            "text": question,
-                            "wrap": True,
-                            "style": "emphasis"
-                        },
-                        {
-                            "type": "TextBlock",
-                            "text": "⚠️ **Шалтгаан:** AI систем энэ асуултад хариулж чадсангүй эсвэл хангалттай мэдээлэл олдсонгүй.",
-                            "wrap": True,
-                            "color": "Warning"
-                        }
-                    ],
-                    "actions": [
-                        {
-                            "type": "Action.OpenUrl",
-                            "title": "💬 Харилцаа нээх",
-                            "url": conversation_url
-                        },
-                        {
-                            "type": "Action.OpenUrl", 
-                            "title": "📧 Хэрэглэгчтэй холбогдох",
-                            "url": f"mailto:{user_email}?subject=Таны асуултын талаар&body=Сайн байна уу {user_name},%0A%0AТаны асуулт: {question}%0A%0A"
-                        }
-                    ]
-                }
-            }
-        ]
-    }
-    
-    try:
-        response = requests.post(TEAMS_WEBHOOK_URL, json=teams_payload, timeout=10)
-        response.raise_for_status()
-        logging.info(f"Successfully sent Teams notification for conversation {conversation_id}")
-        return True
-    except Exception as e:
-        logging.error(f"Failed to send Teams notification: {e}")
-        return False
-
-def generate_verification_code():
-    """Generate 6-digit verification code"""
-    return ''.join(random.choices(string.digits, k=6))
-
-def send_verification_email(email: str, code: str, user_name: str = "Хэрэглэгч"):
-    """Send email verification code via SMTP"""
-    if not all([SMTP_USERNAME, SMTP_PASSWORD, SMTP_FROM_EMAIL]):
-        logging.error("SMTP configuration incomplete")
-        return False
-    
-    try:
-        # Create message
-        msg = MIMEMultipart()
-        msg['From'] = SMTP_FROM_EMAIL
-        msg['To'] = email
-        msg['Subject'] = "Cloud.mn - Email баталгаажуулах код"
-        
-        # Email body
-        body = f"""
-Сайн байна уу {user_name}!
-
-Таны Cloud.mn дэмжлэгийн хүсэлтийг баталгаажуулахын тулд доорх кодыг оруулна уу:
-
-🔐 Баталгаажуулах код: {code}
-
-Энэ код 10 минутын дараа хүчингүй болно.
-
-Хэрэв та энэ хүсэлтийг илгээгээгүй бол Cloud mn рүү мэдэгдэнэ үү..
-
-Баярлалаа,
-Cloud.mn баг
-        """
-        
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))
-        
-        # Send email
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(SMTP_USERNAME, SMTP_PASSWORD)
-        text = msg.as_string()
-        server.sendmail(SMTP_FROM_EMAIL, email, text)
-        server.quit()
-        
-        logging.info(f"Verification email sent to {email}")
-        return True
-        
-    except Exception as e:
-        logging.error(f"Failed to send verification email: {e}")
-        return False
-
-def start_email_verification(conv_id: int, email: str, user_name: str, original_question: str):
-    """Start email verification process"""
-    global email_verification_codes, pending_support_requests
-    
-    # Generate verification code
-    code = generate_verification_code()
-    timestamp = datetime.now()
-    
-    # Store verification data
-    email_verification_codes[conv_id] = {
-        "email": email,
-        "code": code,
-        "timestamp": timestamp,
-        "user_name": user_name
-    }
-    
-    # Store pending support request
-    pending_support_requests[conv_id] = {
-        "email": email,
-        "question": original_question,
-        "details": "",
-        "verified": False,
-        "user_name": user_name
-    }
-    
-    # Send verification email
-    if send_verification_email(email, code, user_name):
-        return True
-    else:
-        # Clean up if email failed
-        if conv_id in email_verification_codes:
-            del email_verification_codes[conv_id]
-        if conv_id in pending_support_requests:
-            del pending_support_requests[conv_id]
-        return False
-
-def verify_email_code(conv_id: int, submitted_code: str):
-    """Verify submitted email code"""
-    global email_verification_codes, pending_support_requests
-    
-    if conv_id not in email_verification_codes:
-        return {"success": False, "message": "Баталгаажуулах код олдсонгүй. Дахин эхлүүлнэ үү."}
-    
-    verification_data = email_verification_codes[conv_id]
-    
-    # Check if code expired (10 minutes)
-    time_diff = datetime.now() - verification_data["timestamp"]
-    if time_diff.total_seconds() > 600:  # 10 minutes
-        del email_verification_codes[conv_id]
-        if conv_id in pending_support_requests:
-            del pending_support_requests[conv_id]
-        return {"success": False, "message": "Баталгаажуулах код хугацаа дууссан. Дахин эхлүүлнэ үү."}
-    
-    # Check code
-    if submitted_code.strip() == verification_data["code"]:
-        # Mark as verified
-        if conv_id in pending_support_requests:
-            pending_support_requests[conv_id]["verified"] = True
-        
-        # Clean up verification code
-        del email_verification_codes[conv_id]
-        
-        return {"success": True, "message": "Email амжилттай баталгаажлаа!"}
-    else:
-        return {"success": False, "message": "Буруу код байна. Дахин оролдоно уу."}
-
-def collect_support_details(conv_id: int, details: str):
-    """Collect additional details for support request"""
-    global pending_support_requests
-    
-    if conv_id not in pending_support_requests:
-        return {"success": False, "message": "Дэмжлэгийн хүсэлт олдсонгүй."}
-    
-    if not pending_support_requests[conv_id]["verified"]:
-        return {"success": False, "message": "Эхлээд email хаягаа баталгаажуулна уу."}
-    
-    # Store details
-    pending_support_requests[conv_id]["details"] = details
-    
-    return {"success": True, "message": "Дэлгэрэнгүй мэдээлэл хадгалагдлаа!"}
-
-def finalize_support_request(conv_id: int):
-    """Send final support request to Teams"""
-    global pending_support_requests
-    
-    if conv_id not in pending_support_requests:
-        return {"success": False, "message": "Дэмжлэгийн хүсэлт олдсонгүй."}
-    
-    request_data = pending_support_requests[conv_id]
-    
-    if not request_data["verified"]:
-        return {"success": False, "message": "Email баталгаажуулаагүй байна."}
-    
-    # Send to Teams
-    success = send_to_teams(
-        user_email=request_data["email"],
-        user_name=request_data["user_name"],
-        question=f"{request_data['question']}\n\nДэлгэрэнгүй: {request_data['details']}",
-        conversation_id=conv_id
-    )
-    
-    if success:
-        # Clean up
-        del pending_support_requests[conv_id]
-        return {"success": True, "message": "Дэмжлэгийн хүсэлт амжилттай илгээгдлээ!"}
-    else:
-        return {"success": False, "message": "Teams-рүү илгээхэд алдаа гарлаа."}
-
 
 # —— API Endpoints —— #
 @app.route("/api/scrape", methods=["POST"])
@@ -690,8 +381,8 @@ def api_crawl():
 # —— Enhanced Chatwoot Webhook —— #
 @app.route("/webhook/chatwoot", methods=["POST"])
 def chatwoot_webhook():
-    """Enhanced webhook with AI integration, email verification and Teams fallback"""
-    global crawled_data, crawl_status, email_verification_codes, pending_support_requests
+    """Enhanced webhook with AI integration"""
+    global crawled_data, crawl_status  # Move global declaration to the top
     
     data = request.json or {}
     
@@ -703,99 +394,12 @@ def chatwoot_webhook():
     text = data.get("content", "").strip()
     contact = data.get("conversation", {}).get("contact", {})
     contact_name = contact.get("name", "Хэрэглэгч")
-    contact_email = contact.get("email", "")
     
-    logging.info(f"Received message from {contact_name} ({contact_email}) in conversation {conv_id}: {text}")
+    logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
     
-    # Check if user is in email verification process
-    if conv_id in email_verification_codes:
-        # User is submitting verification code
-        result = verify_email_code(conv_id, text)
-        send_to_chatwoot(conv_id, result["message"])
-        
-        if result["success"]:
-            # Ask for more details
-            send_to_chatwoot(conv_id, 
-                "✅ Email баталгаажлаа! Одоо асуудлынхаа талаар дэлгэрэнгүй мэдээлэл өгнө үү. "
-                "Жишээ нь: ямар алдаа гарч байна, хэзээнээс эхэлсэн, юу хийх гэж байсан гэх мэт."
-            )
-        
-        return jsonify({"status": "success"}), 200
-    
-    # Check if user is providing support details
-    if conv_id in pending_support_requests and pending_support_requests[conv_id]["verified"] and not pending_support_requests[conv_id]["details"]:
-        # User is providing additional details
-        result = collect_support_details(conv_id, text)
-        send_to_chatwoot(conv_id, result["message"])
-        
-        if result["success"]:
-            # Finalize and send to Teams
-            final_result = finalize_support_request(conv_id)
-            send_to_chatwoot(conv_id, final_result["message"])
-            
-            if final_result["success"]:
-                send_to_chatwoot(conv_id, 
-                    "🎯 Таны дэмжлэгийн хүсэлт баталгаажсан email хаяг болон дэлгэрэнгүй "
-                    "мэдээллийн хамт манай багт илгээгдлээ. Тэд удахгүй танд хариулах болно."
-                )
-        
-        return jsonify({"status": "success"}), 200
-    
-    # Regular AI conversation
-    ai_result = get_ai_response(text, conv_id, crawled_data)
-    ai_response = ai_result["response"]
-    needs_human = ai_result["needs_human"]
-    human_requested = ai_result.get("human_requested", False)
-    
-    # Send AI response to chatwoot
+    # General AI conversation only
+    ai_response = get_ai_response(text, conv_id, crawled_data)
     send_to_chatwoot(conv_id, ai_response)
-    
-    # If AI needs human help, start email verification process
-    if needs_human and ENABLE_TEAMS_FALLBACK and ENABLE_EMAIL_VERIFICATION:
-        logging.info(f"Starting email verification process for conversation {conv_id}")
-        
-        if not contact_email:
-            send_to_chatwoot(conv_id, 
-                "⚠️ Дэмжлэгийн багт хүсэлт илгээхийн тулд та эхлээд email хаяг баталгаажуулна уу."
-            )
-            return jsonify({"status": "success"}), 200
-        
-        # Start email verification
-        if start_email_verification(conv_id, contact_email, contact_name, text):
-            verification_message = (
-                f"📧 Таны email хаяг ({contact_email}) руу баталгаажуулах код илгээлээ. "
-                f"Кодыг энд оруулж дэмжлэгийн хүсэлтээ баталгаажуулна уу.\n\n"
-                f"💡 Код 10 минутын дараа хүчингүй болно."
-            )
-            send_to_chatwoot(conv_id, verification_message)
-        else:
-            send_to_chatwoot(conv_id, 
-                "❌ Email илгээхэд алдаа гарлаа. SMTP тохиргоог шалгана уу эсвэл админтай холбогдоно уу."
-            )
-    
-    elif needs_human and ENABLE_TEAMS_FALLBACK and not ENABLE_EMAIL_VERIFICATION:
-        # Direct Teams notification without email verification (fallback)
-        if contact_email:
-            send_to_teams(
-                user_email=contact_email,
-                user_name=contact_name,
-                question=text,
-                conversation_id=conv_id
-            )
-            
-            fallback_message = (
-                "✅ Таны хүсэлтийг дэмжлэгийн багт илгээлээ. "
-                "Тэд удахгүй танд хариулах болно."
-            ) if human_requested else (
-                "🔔 Таны асуулт нарийн туслалцаа шаардаж байна. "
-                "Дэмжлэгийн багт илгээж байна."
-            )
-            
-            send_to_chatwoot(conv_id, fallback_message)
-        else:
-            send_to_chatwoot(conv_id, 
-                "⚠️ Дэмжлэгийн багт хүсэлт илгээхийн тулд профайлдаа email хаяг оруулна уу."
-            )
 
     return jsonify({"status": "success"}), 200
 
@@ -903,17 +507,11 @@ def health_check():
         "crawl_status": crawl_status,
         "crawled_pages": len(crawled_data),
         "active_conversations": len(conversation_memory),
-        "pending_verifications": len(email_verification_codes),
-        "pending_support_requests": len(pending_support_requests),
         "config": {
             "root_url": ROOT_URL,
             "auto_crawl_enabled": AUTO_CRAWL_ON_START,
             "openai_configured": client is not None,
-            "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID),
-            "teams_configured": bool(TEAMS_WEBHOOK_URL),
-            "teams_fallback_enabled": ENABLE_TEAMS_FALLBACK,
-            "smtp_configured": bool(SMTP_USERNAME and SMTP_PASSWORD and SMTP_FROM_EMAIL),
-            "email_verification_enabled": ENABLE_EMAIL_VERIFICATION
+            "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID)
         }
     })
 
