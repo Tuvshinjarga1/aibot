@@ -23,6 +23,10 @@ CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com"
 OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
 AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true"
 
+# Microsoft Teams webhook config
+TEAMS_WEBHOOK_URL    = os.getenv("TEAMS_WEBHOOK_URL")
+ENABLE_TEAMS_FALLBACK = os.getenv("ENABLE_TEAMS_FALLBACK", "true").lower() == "true"
+
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -155,7 +159,7 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     """Enhanced AI response with better context awareness"""
     
     if not client:
-        return "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
+        return {"response": "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу.", "needs_human": True}
     
     # Get conversation history
     history = conversation_memory.get(conversation_id, [])
@@ -184,6 +188,9 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     2. Хэрэв ойлгомжгүй бол тодорхой асууна уу
     3. Хариултаа бүтэцтэй, цэгцтэй байлгаарай
     4. Техникийн нэр томъёог монгол хэлээр тайлбарлаарай
+    
+    ЧУХАЛ: Хэрэв та асуултад хариулж чадахгүй эсвэл мэдээлэл хангалтгүй бол хариултынхаа эхэнд "NEEDS_HUMAN:" гэж бичээд хариулаарай.
+    Жишээ: "NEEDS_HUMAN: Уучлаарай, энэ асуултын талаар тодорхой мэдээлэл олдсонгүй..."
     
     Боломжит командууд:
     - crawl: Бүх сайтыг шүүрдэх
@@ -219,6 +226,12 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         
         ai_response = response.choices[0].message.content
         
+        # Check if AI indicates it needs human help
+        needs_human = ai_response.startswith("NEEDS_HUMAN:")
+        if needs_human:
+            # Remove the NEEDS_HUMAN: prefix from the response
+            ai_response = ai_response.replace("NEEDS_HUMAN:", "").strip()
+        
         # Store in memory
         if conversation_id not in conversation_memory:
             conversation_memory[conversation_id] = []
@@ -230,11 +243,12 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         if len(conversation_memory[conversation_id]) > 8:
             conversation_memory[conversation_id] = conversation_memory[conversation_id][-8:]
             
-        return ai_response
+        return {"response": ai_response, "needs_human": needs_human}
         
     except Exception as e:
         logging.error(f"OpenAI API алдаа: {e}")
-        return f"🔧 AI-тай холбогдоход саад гарлаа. Та дараах аргуудаар тусламж авч болно:\n• 'help' командыг ашиглана уу\n• 'crawl' эсвэл 'search' командуудыг туршина уу\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
+        error_response = f"🔧 AI-тай холбогдоход саад гарлаа. Та дараах аргуудаар тусламж авч болно:\n• 'help' командыг ашиглана уу\n• 'crawl' эсвэл 'search' командуудыг туршина уу\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
+        return {"response": error_response, "needs_human": True}
 
 def search_in_crawled_data(query: str, max_results: int = 3):
     """Enhanced search through crawled data with better relevance scoring"""
@@ -362,6 +376,96 @@ def mark_conversation_resolved(conv_id: int):
         logging.error(f"Failed to mark conversation as resolved: {e}")
         return False
 
+def send_to_teams(user_email: str, user_name: str, question: str, conversation_id: int, conversation_url: str = None):
+    """Send notification to Microsoft Teams when AI cannot answer"""
+    if not TEAMS_WEBHOOK_URL or not ENABLE_TEAMS_FALLBACK:
+        logging.warning("Teams webhook not configured or disabled")
+        return False
+    
+    # Create conversation URL if not provided
+    if not conversation_url:
+        conversation_url = f"{CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conversation_id}"
+    
+    # Create Teams adaptive card
+    teams_payload = {
+        "type": "message",
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.cards.adaptive",
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.3",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "text": "🚨 AI Туслах Хариулж Чадсангүй",
+                            "weight": "Bolder",
+                            "size": "Large",
+                            "color": "Attention"
+                        },
+                        {
+                            "type": "FactSet",
+                            "facts": [
+                                {
+                                    "title": "👤 Хэрэглэгч:",
+                                    "value": f"{user_name} ({user_email})"
+                                },
+                                {
+                                    "title": "💬 Харилцаа ID:",
+                                    "value": str(conversation_id)
+                                },
+                                {
+                                    "title": "⏰ Цаг:",
+                                    "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                }
+                            ]
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": "❓ **Асуулт:**",
+                            "weight": "Bolder",
+                            "size": "Medium"
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": question,
+                            "wrap": True,
+                            "style": "emphasis"
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": "⚠️ **Шалтгаан:** AI систем энэ асуултад хариулж чадсангүй эсвэл хангалттай мэдээлэл олдсонгүй.",
+                            "wrap": True,
+                            "color": "Warning"
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "type": "Action.OpenUrl",
+                            "title": "💬 Харилцаа нээх",
+                            "url": conversation_url
+                        },
+                        {
+                            "type": "Action.OpenUrl", 
+                            "title": "📧 Хэрэглэгчтэй холбогдох",
+                            "url": f"mailto:{user_email}?subject=Таны асуултын талаар&body=Сайн байна уу {user_name},%0A%0AТаны асуулт: {question}%0A%0A"
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    
+    try:
+        response = requests.post(TEAMS_WEBHOOK_URL, json=teams_payload, timeout=10)
+        response.raise_for_status()
+        logging.info(f"Successfully sent Teams notification for conversation {conversation_id}")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to send Teams notification: {e}")
+        return False
+
 
 # —— API Endpoints —— #
 @app.route("/api/scrape", methods=["POST"])
@@ -385,7 +489,7 @@ def api_crawl():
 # —— Enhanced Chatwoot Webhook —— #
 @app.route("/webhook/chatwoot", methods=["POST"])
 def chatwoot_webhook():
-    """Enhanced webhook with AI integration"""
+    """Enhanced webhook with AI integration and Teams fallback"""
     global crawled_data, crawl_status  # Move global declaration to the top
     
     data = request.json or {}
@@ -398,12 +502,39 @@ def chatwoot_webhook():
     text = data.get("content", "").strip()
     contact = data.get("conversation", {}).get("contact", {})
     contact_name = contact.get("name", "Хэрэглэгч")
+    contact_email = contact.get("email", "")
     
-    logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
+    logging.info(f"Received message from {contact_name} ({contact_email}) in conversation {conv_id}: {text}")
     
     # General AI conversation only
-    ai_response = get_ai_response(text, conv_id, crawled_data)
+    ai_result = get_ai_response(text, conv_id, crawled_data)
+    ai_response = ai_result["response"]
+    needs_human = ai_result["needs_human"]
+    
+    # Send AI response to chatwoot
     send_to_chatwoot(conv_id, ai_response)
+    
+    # If AI needs human help, send notification to Teams
+    if needs_human and ENABLE_TEAMS_FALLBACK:
+        logging.info(f"AI needs human help for conversation {conv_id}, sending Teams notification")
+        
+        # Add fallback message to chatwoot
+        fallback_message = (
+            "🔔 Таны асуултыг дэмжлэгийн баг руу илгээлээ. "
+            "Манай баг удахгүй танд хариулах болно."
+        )
+        send_to_chatwoot(conv_id, fallback_message)
+        
+        # Send notification to Teams
+        if contact_email:
+            send_to_teams(
+                user_email=contact_email,
+                user_name=contact_name,
+                question=text,
+                conversation_id=conv_id
+            )
+        else:
+            logging.warning(f"No email found for contact in conversation {conv_id}, cannot send Teams notification")
 
     return jsonify({"status": "success"}), 200
 
@@ -515,7 +646,9 @@ def health_check():
             "root_url": ROOT_URL,
             "auto_crawl_enabled": AUTO_CRAWL_ON_START,
             "openai_configured": client is not None,
-            "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID)
+            "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID),
+            "teams_configured": bool(TEAMS_WEBHOOK_URL),
+            "teams_fallback_enabled": ENABLE_TEAMS_FALLBACK
         }
     })
 
