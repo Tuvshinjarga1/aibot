@@ -359,6 +359,42 @@ def mark_conversation_resolved(conv_id: int):
         logging.error(f"Failed to mark conversation as resolved: {e}")
         return False
 
+def assign_to_support_team(conv_id: int, escalation_reason: str):
+    """Assign conversation to support team and add labels"""
+    
+    # Add label to conversation
+    label_url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/labels"
+    headers = {"api_access_token": CHATWOOT_API_KEY, "Content-Type": "application/json"}
+    
+    # Add escalation label
+    label_payload = {"labels": ["escalated", "needs-human-support"]}
+    
+    try:
+        resp = requests.post(label_url, json=label_payload, headers=headers, timeout=10)
+        if resp.status_code in [200, 201]:
+            logging.info(f"Added escalation labels to conversation {conv_id}")
+        
+        # Update conversation status to open and priority
+        status_url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}"
+        status_payload = {
+            "status": "open",
+            "priority": "high",
+            "custom_attributes": {
+                "escalation_reason": escalation_reason,
+                "escalated_at": datetime.now().isoformat()
+            }
+        }
+        
+        resp = requests.patch(status_url, json=status_payload, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            logging.info(f"Updated conversation {conv_id} status for escalation")
+            return True
+            
+    except Exception as e:
+        logging.error(f"Failed to assign conversation to support team: {e}")
+    
+    return False
+
 
 # —— Microsoft Teams Integration —— #
 def send_to_teams(user_message: str, contact_name: str = "Хэрэглэгч", conv_id: int = None):
@@ -404,6 +440,129 @@ def send_to_teams(user_message: str, contact_name: str = "Хэрэглэгч", c
         logging.error(f"Failed to send message to Teams: {e}")
         return False
 
+def send_escalation_to_teams(user_message: str, contact_name: str, conv_id: int, reason: str):
+    """Send escalation notification to Teams support team"""
+    if not TEAMS_WEBHOOK_URL:
+        logging.warning("Teams webhook URL not configured")
+        return False
+    
+    # Create escalation message card
+    teams_message = {
+        "@type": "MessageCard",
+        "@context": "http://schema.org/extensions",
+        "themeColor": "FF6B35",  # Orange color for escalation
+        "summary": "🚨 Дэмжлэгийн багт чиглүүлэх асуулт",
+        "sections": [{
+            "activityTitle": "🚨 ДЭМЖЛЭГИЙН БАГТ ЧИГЛҮҮЛЭХ",
+            "activitySubtitle": f"AI-аас хүний дэмжлэг шаардлагатай - {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "facts": [
+                {
+                    "name": "Хэрэглэгч:",
+                    "value": contact_name
+                },
+                {
+                    "name": "Харилцан яриа ID:",
+                    "value": str(conv_id)
+                },
+                {
+                    "name": "Чиглүүлэх шалтгаан:",
+                    "value": reason
+                },
+                {
+                    "name": "Асуулт:",
+                    "value": user_message[:400] + "..." if len(user_message) > 400 else user_message
+                }
+            ],
+            "markdown": True
+        }],
+        "potentialAction": [{
+            "@type": "OpenUri",
+            "name": "Chatwoot-д харах",
+            "targets": [{
+                "os": "default",
+                "uri": f"{CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conv_id}"
+            }]
+        }]
+    }
+    
+    try:
+        headers = {"Content-Type": "application/json"}
+        resp = requests.post(TEAMS_WEBHOOK_URL, json=teams_message, headers=headers, timeout=10)
+        resp.raise_for_status()
+        logging.info(f"Escalation sent to Teams for conversation {conv_id}: {reason}")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to send escalation to Teams: {e}")
+        return False
+
+def analyze_need_human_support(user_message: str, ai_response: str = None) -> tuple[bool, str]:
+    """Analyze if the question needs human support based on content and AI confidence"""
+    
+    # Keywords that typically require human support
+    escalation_keywords = [
+        # Technical issues
+        'алдаа', 'error', 'bug', 'асуудал', 'problem', 'issue',
+        'ажиллахгүй', 'not working', 'broken', 'эвдэрсэн',
+        
+        # Account/billing related
+        'төлбөр', 'billing', 'payment', 'данс', 'account', 'subscription',
+        'цуцлах', 'cancel', 'refund', 'буцаах',
+        
+        # Urgent requests
+        'яаралтай', 'urgent', 'асуудалтай', 'тусламж', 'help me',
+        'холбогдох', 'contact', 'дуудах', 'call',
+        
+        # Complex technical setup
+        'суулгах', 'install', 'тохируулах', 'configure', 'setup',
+        'интеграци', 'integration', 'api', 'webhook',
+        
+        # Complaints
+        'гомдол', 'complaint', 'сэтгэл хангалуун бус', 'dissatisfied'
+    ]
+    
+    # Check for escalation keywords
+    message_lower = user_message.lower()
+    found_keywords = [kw for kw in escalation_keywords if kw in message_lower]
+    
+    # Check message length - very long messages might need human attention
+    is_complex = len(user_message) > 300
+    
+    # Check for question marks - multiple questions might be complex
+    question_count = user_message.count('?') + user_message.count('уу')
+    is_multi_question = question_count > 2
+    
+    # Check AI response confidence indicators
+    low_confidence_phrases = [
+        'мэдэхгүй', 'тодорхойгүй', 'баталж чадахгүй', 'админтай холбогдоно уу',
+        'дэлгэрэнгүй мэдээлэл', 'нэмэлт тусламж'
+    ]
+    
+    ai_uncertain = False
+    if ai_response:
+        ai_response_lower = ai_response.lower()
+        ai_uncertain = any(phrase in ai_response_lower for phrase in low_confidence_phrases)
+    
+    # Decision logic
+    if found_keywords:
+        reason = f"Техникийн дэмжлэг шаардлагатай түлхүүр үгс: {', '.join(found_keywords[:3])}"
+        return True, reason
+    
+    if ai_uncertain:
+        reason = "AI хариулт тодорхойгүй байна"
+        return True, reason
+    
+    if is_complex and is_multi_question:
+        reason = "Нарийн төвөгтэй олон асуулттай"
+        return True, reason
+    
+    # Check for direct requests to talk to human
+    human_request_phrases = ['хүнтэй ярих', 'дэмжлэгийн баг', 'support team', 'админ']
+    if any(phrase in message_lower for phrase in human_request_phrases):
+        reason = "Хэрэглэгч шууд хүний дэмжлэг хүссэн"
+        return True, reason
+    
+    return False, ""
+
 
 # —— API Endpoints —— #
 @app.route("/api/scrape", methods=["POST"])
@@ -448,6 +607,24 @@ def chatwoot_webhook():
     
     # General AI conversation only
     ai_response = get_ai_response(text, conv_id, crawled_data)
+    
+    # Analyze if human support is needed
+    needs_escalation, escalation_reason = analyze_need_human_support(text, ai_response)
+    
+    if needs_escalation:
+        # Send escalation notification to Teams
+        send_escalation_to_teams(text, contact_name, conv_id, escalation_reason)
+        
+        # Assign conversation to support team in Chatwoot
+        assign_to_support_team(conv_id, escalation_reason)
+        
+        # Add escalation notice to AI response
+        escalation_notice = f"\n\n🚨 **Дэмжлэгийн багт чиглүүлэх шаардлагатай**\nШалтгаан: {escalation_reason}\n\nМанай дэмжлэгийн баг удахгүй танд хариулах болно."
+        ai_response += escalation_notice
+        
+        # Mark conversation for human attention (you can add tags or labels here)
+        logging.info(f"Conversation {conv_id} escalated to support team: {escalation_reason}")
+    
     send_to_chatwoot(conv_id, ai_response)
 
     return jsonify({"status": "success"}), 200
