@@ -756,7 +756,7 @@ def chatwoot_webhook():
         
         if not contact_email:
             send_to_chatwoot(conv_id, 
-                "⚠️ Дэмжлэгийн багт хүсэлт илгээхийн тулд та эхлээд профайлдаа email хаяг оруулна уу."
+                "⚠️ Дэмжлэгийн багт хүсэлт илгээхийн тулд та эхлээд email хаяг баталгаажуулна уу."
             )
             return jsonify({"status": "success"}), 200
         
