@@ -38,5 +38,8 @@ async def webhook(request: Request):
         print(f"❌ Error: {e}")
         return {"status": "error", "message": str(e)}
 
+# Gunicorn-д зориулж ASGI worker-ийг тохируулах
+app = app
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
