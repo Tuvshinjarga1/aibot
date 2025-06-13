@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request
-import gunicorn
+import uvicorn
 import requests
 
 app = FastAPI()
@@ -32,4 +32,4 @@ async def webhook(request: Request):
     return {"status": "received"}
 
 if __name__ == "__main__":
-    gunicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

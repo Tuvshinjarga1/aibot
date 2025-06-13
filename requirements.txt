@@ -12,4 +12,4 @@ faiss-cpu
 tiktoken
 gunicorn
 fastapi
-unicorn
+uvicorn
