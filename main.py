@@ -309,7 +309,6 @@ def scrape_single(url: str):
 # —— Enhanced Chatwoot Integration —— #
 def send_to_chatwoot(conv_id: int, content: str, message_type: str = "outgoing"):
     """Enhanced chatwoot message sending with better error handling"""
-    time.sleep(15)
     api_url = (
         f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}"
         f"/conversations/{conv_id}/messages"
@@ -588,6 +587,7 @@ def api_crawl():
 @app.route("/webhook/chatwoot", methods=["POST"])
 def chatwoot_webhook():
     """Enhanced webhook with AI integration"""
+    time.sleep(10)
     global crawled_data, crawl_status  # Move global declaration to the top
     
     data = request.json or {}
