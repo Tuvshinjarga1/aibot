@@ -35,8 +35,8 @@ def chatwoot_webhook():
     # Chatwoot API руу POST
     url = (
         f"{CHATWOOT_BASE_URL}/api/v1/accounts/"
-        f"{CHATWOOT_ACCOUNT_ID}/conversations/"
-        f"{conversation_id}/messages"
+        f"{CHATWOOT_ACCOUNT_ID}/conversations/12/messages"
+        # f"{conversation_id}/messages"
     )
     headers = {
         "api_access_token": CHATWOOT_API_TOKEN,
