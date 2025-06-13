@@ -309,6 +309,7 @@ def scrape_single(url: str):
 # —— Enhanced Chatwoot Integration —— #
 def send_to_chatwoot(conv_id: int, content: str, message_type: str = "outgoing"):
     """Enhanced chatwoot message sending with better error handling"""
+    time.sleep(15)
     api_url = (
         f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}"
         f"/conversations/{conv_id}/messages"
