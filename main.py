@@ -2,6 +2,9 @@ from fastapi import FastAPI, Request
 import uvicorn
 import requests
 import os
+from dotenv import load_dotenv
+
+load_dotenv()  # .env файлыг уншуулна
 
 app = FastAPI()
 
@@ -9,7 +12,7 @@ app = FastAPI()
 async def webhook(request: Request):
     try:
         body = await request.json()
-        message = body.get("content")
+        message = body.get("message", {}).get("content")
 
         if message == 'Hi':
             url = "https://app.chatwoot.com/api/v1/accounts/123470/conversations/12/messages"
@@ -24,17 +27,15 @@ async def webhook(request: Request):
                 "Content-Type": "application/json"
             }
 
+            print("📤 Sending message to Chatwoot...")
             response = requests.post(url, json=data, headers=headers)
 
-            if response.status_code == 200:
-                print(f"Success: {response.status_code}, Response: {response.text}")
-            else:
-                print(f"Error: {response.status_code}, Response: {response.text}")
+            print(f"📥 Chatwoot response: {response.status_code} - {response.text}")
 
         return {"status": "received"}
 
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"❌ Error: {e}")
         return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
