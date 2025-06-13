@@ -4,15 +4,15 @@ FROM python:3.10-slim
 # Ажиллах директор үүсгэх
 WORKDIR /app
 
-# Шаардлагатай файлуудыг хуулж суулгах
-COPY requirements.txt ./
+# requirements.txt-ийг эхэлж хуулж, дараа нь багцуудыг суулгах
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # App source-г хуулна
 COPY . .
 
-# Порт нээх (gunicorn default: 8000)
+# Порт нээх
 EXPOSE 8000
 
-# Flask + Gunicorn ажиллуулах
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "main:app"]
+# Gunicorn + Uvicorn Worker ашиглан FastAPI app ажиллуулах
+CMD ["gunicorn", "main:app", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]
