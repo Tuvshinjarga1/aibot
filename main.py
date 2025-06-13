@@ -15,6 +15,10 @@ def send_to_chatwoot():
     # Expecting JSON like: { "content": "Your message here" }
     data = request.get_json(force=True)
     content = data.get("content")
+
+    if content == "Hi":
+        content = "Hello, таньд юугаар туслах вэ?"
+
     if not content:
         return jsonify({"error": "Missing 'content' in request body"}), 400
 
