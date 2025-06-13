@@ -14,32 +14,28 @@ def chatwoot_webhook():
     payload = request.get_json(force=True)
     print("🔥 Raw webhook payload:", payload)
 
-    # Determine whether payload uses the top-level shape or the nested data.message shape
+    # Pick apart top-level vs data.message format
     if "data" in payload and isinstance(payload["data"], dict):
-        # Newer Chatwoot webhook format
-        event         = payload.get("event")
-        data          = payload["data"]
-        message_src   = data.get("message", {})
-        conv_src      = data.get("conversation", {})
+        event       = payload.get("event")
+        data        = payload["data"]
+        message_src = data.get("message", {})
+        conv_src    = data.get("conversation", {})
     else:
-        # Older or WebWidget format: payload itself is the message
-        event         = payload.get("event")
-        message_src   = payload
-        conv_src      = payload.get("conversation", {})
+        event       = payload.get("event")
+        message_src = payload
+        conv_src    = payload.get("conversation", {})
 
-    # Only handle message_created events
+    # Only care about actual new messages
     if event != "message_created":
         print("↩ Ignored event:", event)
         return jsonify({"status": "ignored_event"}), 200
 
-    # Extract fields
-    content      = (message_src.get("content") or "").strip()
-    msg_type     = message_src.get("message_type")
-    conv_id      = conv_src.get("id")
+    content  = (message_src.get("content") or "").strip()
+    msg_type = message_src.get("message_type")
+    conv_id  = conv_src.get("id")
+    print(f"→ Parsed: type={msg_type!r}, content={content!r}, conv_id={conv_id!r}")
 
-    print(f"→ Parsed: message_type={msg_type!r}, content={content!r}, conv_id={conv_id!r}")
-
-    # Only reply to incoming (user) messages and require a conversation ID
+    # Only respond to user messages
     if msg_type not in ("incoming", 0, "0") or not conv_id:
         print("↩ Ignoring non-user message or missing conv_id")
         return jsonify({"status": "ignored"}), 200
@@ -48,19 +44,30 @@ def chatwoot_webhook():
     if content.lower() == "hi":
         reply_text = "Hello, таньд юугаар туслах вэ?"
     else:
-        # Echo back or implement other logic
-        reply_text = content
+        reply_text = content  # echo
 
-    # Send reply back into the conversation
-    post_url = (
+    # 1) Reopen the conversation (if it was resolved/closed)
+    reopen_url = (
         f"{CHATWOOT_BASE_URL}/api/v1/accounts/"
         f"{CHATWOOT_ACCOUNT_ID}/conversations/"
-        f"{conv_id}/messages"
+        f"{conv_id}/reopen"
     )
     headers = {
         "api_access_token": CHATWOOT_API_TOKEN,
         "Content-Type": "application/json"
     }
+    # Fire-and-forget; if it fails, we still try to send the message
+    try:
+        requests.post(reopen_url, headers=headers, timeout=3)
+    except Exception as e:
+        print("⚠ Failed to reopen conversation:", e)
+
+    # 2) Send your reply
+    post_url = (
+        f"{CHATWOOT_BASE_URL}/api/v1/accounts/"
+        f"{CHATWOOT_ACCOUNT_ID}/conversations/"
+        f"{conv_id}/messages"
+    )
     body = {
         "content":      reply_text,
         "message_type": "outgoing"
@@ -77,8 +84,20 @@ def chatwoot_webhook():
         }), 502
 
     print("✅ Replied with:", repr(reply_text))
+
+    # 3) Mark as unread so agents see the red-dot notification
+    unread_url = (
+        f"{CHATWOOT_BASE_URL}/api/v1/accounts/"
+        f"{CHATWOOT_ACCOUNT_ID}/conversations/"
+        f"{conv_id}/mark_as_unread"
+    )
+    try:
+        requests.post(unread_url, headers=headers, timeout=3)
+    except Exception as e:
+        print("⚠ Failed to mark as unread:", e)
+
     return jsonify({"status": "ok", "replied": reply_text}), 200
 
 if __name__ == "__main__":
-    # debug=True will auto-reload on changes
+    # debug=True for auto-reload; prints go to stdout
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
