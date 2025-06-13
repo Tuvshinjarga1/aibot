@@ -1,35 +1,41 @@
 from fastapi import FastAPI, Request
 import uvicorn
 import requests
+import os
 
 app = FastAPI()
 
 @app.post("/webhook/chatwoot")
-
 async def webhook(request: Request):
+    try:
+        body = await request.json()
+        message = body.get("content")
 
-    body = await request.json()
+        if message == 'Hi':
+            url = "https://app.chatwoot.com/api/v1/accounts/123470/conversations/5/messages"
 
-    message = body.get("content")
+            data = {
+                "content": "Hello, би танд юугаар туслах вэ?",
+                "message_type": "outgoing"
+            }
 
-    if message == 'Hi':
+            headers = {
+                "api_access_token": os.getenv("CHATWOOT_API_KEY"),
+                "Content-Type": "application/json"
+            }
 
-        url = "https://app.chatwoot.com/api/v1/accounts/123470/conversations/5/messages"
+            response = requests.post(url, json=data, headers=headers)
 
-        data = {
-            "content": "Hello, би танд юугаар туслах вэ?",
-            "message_type": "outgoing"
-        }
+            if response.status_code == 200:
+                print(f"Success: {response.status_code}, Response: {response.text}")
+            else:
+                print(f"Error: {response.status_code}, Response: {response.text}")
 
-        headers = {
-            "api_access_token": "Go61PtbAmeXrmmQineSiQyv3",
-            "Content-Type": "application/json"
-        }
+        return {"status": "received"}
 
-        response = requests.post(url, json=data, headers=headers)
-        print(f"Status: {response.status_code}, Response: {response.text}")
-
-    return {"status": "received"}
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
