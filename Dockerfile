@@ -1,10 +1,18 @@
+# Python суурьтай зураг
 FROM python:3.10-slim
 
+# Ажиллах директор үүсгэх
 WORKDIR /app
+
+# requirements.txt-ийг эхэлж хуулж, дараа нь багцуудыг суулгах
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# App source-г хуулна
 COPY . .
 
-EXPOSE 8080
+# Порт нээх
+EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+# Gunicorn + Uvicorn Worker ашиглан FastAPI app ажиллуулах
+CMD ["gunicorn", "main:app", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]
