@@ -10,7 +10,7 @@ CHATWOOT_CONVERSATION_ID = "12"
 CHATWOOT_API_TOKEN = "Go61PtbAmeXrmmQineSiQyv3"
 CHATWOOT_BASE_URL = "https://app.chatwoot.com"
 
-@app.route("/send-to-chatwoot", methods=["POST"])
+@app.route("/webhook/chatwoot", methods=["POST"])
 def send_to_chatwoot():
     # Expecting JSON like: { "content": "Your message here" }
     data = request.get_json(force=True)
