@@ -12,35 +12,46 @@ CHATWOOT_BASE_URL    = "https://app.chatwoot.com"
 @app.route("/webhook/chatwoot", methods=["POST"])
 def chatwoot_webhook():
     payload = request.get_json(force=True)
-    print("🔥 Webhook received:", payload)
+    print("🔥 Raw webhook payload:", payload)
 
-    # Only handle new messages
-    if payload.get("event") != "message_created":
+    # Determine whether payload uses the top-level shape or the nested data.message shape
+    if "data" in payload and isinstance(payload["data"], dict):
+        # Newer Chatwoot webhook format
+        event         = payload.get("event")
+        data          = payload["data"]
+        message_src   = data.get("message", {})
+        conv_src      = data.get("conversation", {})
+    else:
+        # Older or WebWidget format: payload itself is the message
+        event         = payload.get("event")
+        message_src   = payload
+        conv_src      = payload.get("conversation", {})
+
+    # Only handle message_created events
+    if event != "message_created":
+        print("↩ Ignored event:", event)
         return jsonify({"status": "ignored_event"}), 200
 
-    data = payload.get("data", {})
-    msg  = data.get("message", {})
-    conv = data.get("conversation", {})
+    # Extract fields
+    content      = (message_src.get("content") or "").strip()
+    msg_type     = message_src.get("message_type")
+    conv_id      = conv_src.get("id")
 
-    content  = (msg.get("content") or "").strip()
-    msg_type = msg.get("message_type")
-    conv_id  = conv.get("id")
+    print(f"→ Parsed: message_type={msg_type!r}, content={content!r}, conv_id={conv_id!r}")
 
-    print(f"→ message_created: type={msg_type} content={content!r} conv_id={conv_id}")
-
-    # Accept both string and numeric "incoming"
-    if (msg_type not in ("incoming", 0, "0")) or not conv_id:
+    # Only reply to incoming (user) messages and require a conversation ID
+    if msg_type not in ("incoming", 0, "0") or not conv_id:
         print("↩ Ignoring non-user message or missing conv_id")
         return jsonify({"status": "ignored"}), 200
 
-    # Decide reply
+    # Build your reply
     if content.lower() == "hi":
         reply_text = "Hello, таньд юугаар туслах вэ?"
     else:
-        # Echo back any other text
+        # Echo back or implement other logic
         reply_text = content
 
-    # Post back to Chatwoot
+    # Send reply back into the conversation
     post_url = (
         f"{CHATWOOT_BASE_URL}/api/v1/accounts/"
         f"{CHATWOOT_ACCOUNT_ID}/conversations/"
