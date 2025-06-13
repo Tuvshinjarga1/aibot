@@ -15,10 +15,12 @@ def webhook():
 
         if message == "Hi":
             url = "https://app.chatwoot.com/api/v1/accounts/123470/conversations/12/messages"
+
             data = {
                 "content": "Hello, би танд юугаар туслах вэ?",
                 "message_type": "outgoing"
             }
+
             headers = {
                 "api_access_token": os.getenv("CHATWOOT_API_KEY"),
                 "Content-Type": "application/json"
@@ -26,6 +28,7 @@ def webhook():
 
             print("📤 Sending message to Chatwoot...")
             response = requests.post(url, json=data, headers=headers)
+
             print(f"📥 Chatwoot response: {response.status_code} - {response.text}")
 
         return jsonify({"status": "received"})
