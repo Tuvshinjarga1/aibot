@@ -1,41 +1,42 @@
 from flask import Flask, request, jsonify
 import requests
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
 
 app = Flask(__name__)
 
-@app.route("/webhook/chatwoot", methods=["POST"])
-def webhook():
+# You can also load this from env vars for security
+CHATWOOT_ACCOUNT_ID = "123470"
+CHATWOOT_CONVERSATION_ID = "12"
+CHATWOOT_API_TOKEN = "Go61PtbAmeXrmmQineSiQyv3"
+CHATWOOT_BASE_URL = "https://app.chatwoot.com"
+
+@app.route("/send-to-chatwoot", methods=["POST"])
+def send_to_chatwoot():
+    # Expecting JSON like: { "content": "Your message here" }
+    data = request.get_json(force=True)
+    content = data.get("content")
+    if not content:
+        return jsonify({"error": "Missing 'content' in request body"}), 400
+
+    url = (
+        f"{CHATWOOT_BASE_URL}/api/v1/accounts/"
+        f"{CHATWOOT_ACCOUNT_ID}/conversations/"
+        f"{CHATWOOT_CONVERSATION_ID}/messages"
+    )
+    payload = {"content": content}
+    headers = {
+        "api_access_token": CHATWOOT_API_TOKEN,
+        "Content-Type": "application/json"
+    }
+
     try:
-        body = request.get_json()
-        message = body.get("message", {}).get("content")
+        resp = requests.post(url, json=payload, headers=headers, timeout=5)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        return jsonify({"error": str(e), "response": getattr(e.response, "text", "")}), 502
 
-        if message == "Hi":
-            url = "https://app.chatwoot.com/api/v1/accounts/123470/conversations/12/messages"
-
-            data = {
-                "content": "Hello, би танд юугаар туслах вэ?",
-                "message_type": "outgoing"
-            }
-
-            headers = {
-                "api_access_token": os.getenv("CHATWOOT_API_KEY"),
-                "Content-Type": "application/json"
-            }
-
-            print("📤 Sending message to Chatwoot...")
-            response = requests.post(url, json=data, headers=headers)
-
-            print(f"📥 Chatwoot response: {response.status_code} - {response.text}")
-
-        return jsonify({"status": "received"})
-
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return jsonify({"status": "error", "message": str(e)})
+    return jsonify(resp.json()), resp.status_code
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+    # Listen on port 5000 by default
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
