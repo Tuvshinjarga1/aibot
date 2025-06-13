@@ -12,7 +12,7 @@ async def webhook(request: Request):
         message = body.get("content")
 
         if message == 'Hi':
-            url = "https://app.chatwoot.com/api/v1/accounts/123470/conversations/5/messages"
+            url = "https://app.chatwoot.com/api/v1/accounts/123470/conversations/12/messages"
 
             data = {
                 "content": "Hello, би танд юугаар туслах вэ?",
