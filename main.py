@@ -8,7 +8,11 @@ from urllib.parse import urljoin, urlparse
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
 from datetime import datetime
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import re
+import random
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -24,7 +28,6 @@ ACCOUNT_ID           = os.getenv("ACCOUNT_ID")
 CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://chat.cloud.mn")
 OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
 AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true"
-TEAMS_WEBHOOK_URL    = os.getenv("TEAMS_WEBHOOK_URL")
 
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -33,78 +36,6 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 conversation_memory = {}
 crawled_data = []
 crawl_status = {"status": "not_started", "message": "Crawling has not started yet"}
-email_verification = {}  # Store email verification status
-
-# —— Email Verification —— #
-def is_valid_email(email: str) -> bool:
-    """Validate email format"""
-    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    return bool(re.match(pattern, email))
-
-def send_verification_email(email: str, conversation_id: int) -> bool:
-    """Send verification email"""
-    # TODO: Implement actual email sending
-    # For now, we'll just simulate verification
-    verification_code = "123456"  # In real implementation, generate a random code
-    email_verification[conversation_id] = {
-        "email": email,
-        "code": verification_code,
-        "verified": False
-    }
-    return True
-
-def verify_email_code(conversation_id: int, code: str) -> bool:
-    """Verify email code"""
-    if conversation_id in email_verification:
-        if email_verification[conversation_id]["code"] == code:
-            email_verification[conversation_id]["verified"] = True
-            return True
-    return False
-
-# —— Microsoft Teams Integration —— #
-def send_to_teams(email: str, issue: str) -> bool:
-    """Send issue to Microsoft Teams"""
-    if not TEAMS_WEBHOOK_URL:
-        logging.error("Teams webhook URL not configured")
-        return False
-
-    message = {
-        "type": "message",
-        "attachments": [
-            {
-                "contentType": "application/vnd.microsoft.card.adaptive",
-                "content": {
-                    "type": "AdaptiveCard",
-                    "body": [
-                        {
-                            "type": "TextBlock",
-                            "text": f"**Хэрэглэгч:** {email}",
-                            "weight": "bolder"
-                        },
-                        {
-                            "type": "TextBlock",
-                            "text": f"**Асуудал:** {issue}",
-                            "wrap": True
-                        }
-                    ],
-                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                    "version": "1.0"
-                }
-            }
-        ]
-    }
-
-    try:
-        response = requests.post(
-            TEAMS_WEBHOOK_URL,
-            json=message,
-            headers={"Content-Type": "application/json"}
-        )
-        response.raise_for_status()
-        return True
-    except Exception as e:
-        logging.error(f"Failed to send to Teams: {e}")
-        return False
 
 # —— Crawl & Scrape —— #
 def crawl_and_scrape(start_url: str):
@@ -227,44 +158,20 @@ def scrape_single(url: str):
 
 # —— AI Assistant Functions —— #
 def get_ai_response(user_message: str, conversation_id: int, context_data: list = None):
-    """Enhanced AI response with email verification and Teams integration"""
+    """Enhanced AI response with better context awareness"""
     
     if not client:
         return "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
     
-    # Check if this is a new conversation
-    if conversation_id not in email_verification:
-        # Check if message contains an email
-        email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', user_message)
-        if email_match:
-            email = email_match.group(0)
-            if is_valid_email(email):
-                send_verification_email(email, conversation_id)
-                return "Таны и-мэйл хаяг руу баталгаажуулах код илгээгдлээ. Кодыг оруулна уу."
-            else:
-                return "И-мэйл хаяг буруу байна. Зөв и-мэйл хаяг оруулна уу."
-        else:
-            return "Таны асуудлыг шийдвэрлэхийн тулд и-мэйл хаяг шаардлагатай. И-мэйл хаягаа оруулна уу."
+    # Get conversation history
+    history = conversation_memory.get(conversation_id, [])
     
-    # Check if email is verified
-    if not email_verification[conversation_id]["verified"]:
-        # Check if message is verification code
-        if user_message.isdigit() and len(user_message) == 6:
-            if verify_email_code(conversation_id, user_message):
-                return "И-мэйл хаяг баталгаажуулагдлаа. Асуудлаа дэлгэрэнгүй тайлбарлана уу."
-            else:
-                return "Баталгаажуулах код буруу байна. Дахин оролдоно уу."
-        else:
-            return "Баталгаажуулах код оруулна уу."
-    
-    # If email is verified, process the issue
-    email = email_verification[conversation_id]["email"]
-    
-    # Check if the issue is in crawled data
+    # Build context from crawled data if available
+    context = ""
     if context_data and crawled_data:
+        # Search for relevant content
         search_results = search_in_crawled_data(user_message, max_results=3)
         if search_results:
-            # Issue found in documentation
             relevant_pages = []
             for result in search_results:
                 relevant_pages.append(
@@ -272,13 +179,68 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
                     f"URL: {result['url']}\n"
                     f"Холбогдох агуулга: {result['snippet']}\n"
                 )
-            return "\n\n".join(relevant_pages)
+            context = "\n\n".join(relevant_pages)
     
-    # If issue not found in documentation, send to Teams
-    if send_to_teams(email, user_message):
-        return "Таны асуудлыг бид хүлээн авлаа. Манай баг тун удахгүй таньтай холбогдох болно."
-    else:
-        return "Уучлаарай, асуудлыг илгээхэд алдаа гарлаа. Дараах удаа дахин оролдоно уу."
+    # Build system message with context
+    system_content = """Та Cloud.mn-ийн баримт бичгийн талаар асуултад хариулдаг Монгол AI туслах юм. 
+    Хэрэглэгчтэй монгол хэлээр ярилцаарай. Хариултаа товч бөгөөд ойлгомжтой байлгаарай.
+    
+    Хариулахдаа дараах зүйлсийг анхаарна уу:
+    1. Хариултаа холбогдох баримт бичгийн линкээр дэмжүүлээрэй
+    2. Хэрэв ойлгомжгүй бол тодорхой асууна уу
+    3. Хариултаа бүтэцтэй, цэгцтэй байлгаарай
+    4. Техникийн нэр томъёог монгол хэлээр тайлбарлаарай
+    
+    Хэрэглэгчийн хүсэлтийг автоматаар таньж, дараах үйлдлүүдийг хийх боломжтой:
+    - Хэрэглэгч мэдээлэл хайхыг хүсвэл, холбогдох мэдээллийг хайж олж хариулна
+    - Хэрэглэгч тодорхой хуудсыг шүүрдэхийг хүсвэл, тухайн хуудсыг шүүрдэж хариулна
+    - Хэрэглэгч тусламж хүсвэл, боломжтой үйлдлүүдийн талаар тайлбарлана
+    - Хэрэглэгч бүх сайтыг шүүрдэхийг хүсвэл, шүүрдэлтийг эхлүүлнэ"""
+    
+    if context:
+        system_content += f"\n\nКонтекст мэдээлэл:\n{context}"
+    
+    # Build conversation context
+    messages = [
+        {
+            "role": "system", 
+            "content": system_content
+        }
+    ]
+    
+    # Add conversation history
+    for msg in history[-4:]:  # Last 4 messages
+        messages.append(msg)
+    
+    # Add current message
+    messages.append({"role": "user", "content": user_message})
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4.1",
+            messages=messages,
+            max_tokens=500,  # Increased token limit for better responses
+            temperature=0.7
+        )
+        
+        ai_response = response.choices[0].message.content
+        
+        # Store in memory
+        if conversation_id not in conversation_memory:
+            conversation_memory[conversation_id] = []
+        
+        conversation_memory[conversation_id].append({"role": "user", "content": user_message})
+        conversation_memory[conversation_id].append({"role": "assistant", "content": ai_response})
+        
+        # Keep only last 8 messages
+        if len(conversation_memory[conversation_id]) > 8:
+            conversation_memory[conversation_id] = conversation_memory[conversation_id][-8:]
+            
+        return ai_response
+        
+    except Exception as e:
+        logging.error(f"OpenAI API алдаа: {e}")
+        return f"🔧 AI-тай холбогдоход саад гарлаа. Дараах зүйлсийг туршиж үзнэ үү:\n• Асуултаа дахин илгээнэ үү\n• Асуултаа тодорхой болгоно уу\n• Холбогдох мэдээллийг хайж үзнэ үү\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
 
 def search_in_crawled_data(query: str, max_results: int = 3):
     """Enhanced search through crawled data with better relevance scoring"""
@@ -404,6 +366,51 @@ def mark_conversation_resolved(conv_id: int):
         return True
     except Exception as e:
         logging.error(f"Failed to mark conversation as resolved: {e}")
+        return False
+
+
+# —— Microsoft Teams Integration —— #
+def send_to_teams(email: str, issue: str) -> bool:
+    """Send issue to Microsoft Teams via webhook"""
+    if not TEAMS_WEBHOOK_URL:
+        logging.error("Teams webhook URL not configured")
+        return False
+        
+    payload = {
+        "@type": "MessageCard",
+        "@context": "http://schema.org/extensions",
+        "themeColor": "0076D7",
+        "summary": f"Шинэ хүсэлт: {email}",
+        "sections": [{
+            "activityTitle": "Cloud.mn - Шинэ хүсэлт",
+            "activitySubtitle": f"Хэрэглэгч: {email}",
+            "activityImage": "https://docs.cloud.mn/logo.png",
+            "facts": [{
+                "name": "Хэрэглэгч:",
+                "value": email
+            }, {
+                "name": "Асуудал:",
+                "value": issue
+            }, {
+                "name": "Огноо:",
+                "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }],
+            "markdown": True
+        }]
+    }
+    
+    try:
+        response = requests.post(
+            TEAMS_WEBHOOK_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        response.raise_for_status()
+        logging.info(f"Issue sent to Teams for {email}")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to send to Teams: {e}")
         return False
 
 
@@ -566,3 +573,48 @@ def health_check():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+# —— Email Verification Functions —— #
+def is_valid_email(email: str) -> bool:
+    """Check if email format is valid"""
+    email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(email_regex, email))
+
+def send_verification_email(email: str) -> str:
+    """Send verification email with code and return the code"""
+    if not SENDER_EMAIL or not SENDER_PASSWORD:
+        logging.error("SMTP credentials not configured")
+        return None
+        
+    # Generate verification code
+    verification_code = ''.join([str(random.randint(0, 9)) for _ in range(6)])
+    
+    # Create email
+    msg = MIMEMultipart()
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = email
+    msg['Subject'] = "Cloud.mn баталгаажуулах код"
+    
+    body = f"""Сайн байна уу,
+
+Таны Cloud.mn-д хандсан хүсэлтийг баталгаажуулахын тулд доорх кодыг оруулна уу:
+
+{verification_code}
+
+Хэрэв та энэ хүсэлтийг илгээгээгүй бол энэ имэйлийг үл тоомсорлоно уу.
+
+Хүндэтгэсэн,
+Cloud.mn Баг"""
+    
+    msg.attach(MIMEText(body, 'plain'))
+    
+    try:
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        logging.info(f"Verification email sent to {email}")
+        return verification_code
+    except Exception as e:
+        logging.error(f"Failed to send verification email: {e}")
+        return None
