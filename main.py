@@ -29,6 +29,16 @@ CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://chat.cloud.mn")
 OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
 AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true"
 
+# SMTP тохиргоо
+SMTP_SERVER          = os.getenv("SMTP_SERVER")
+SMTP_PORT            = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME        = os.getenv("SENDER_EMAIL")
+SMTP_PASSWORD        = os.getenv("SENDER_PASSWORD")
+SMTP_FROM_EMAIL      = os.getenv("SENDER_EMAIL")
+
+# Microsoft Teams webhook
+TEAMS_WEBHOOK_URL    = os.getenv("TEAMS_WEBHOOK_URL")
+
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -437,7 +447,7 @@ def api_crawl():
 @app.route("/webhook/chatwoot", methods=["POST"])
 def chatwoot_webhook():
     """Enhanced webhook with AI integration"""
-    global crawled_data, crawl_status  # Move global declaration to the top
+    global crawled_data, crawl_status
     
     data = request.json or {}
     
@@ -452,10 +462,87 @@ def chatwoot_webhook():
     
     logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
     
-    # General AI conversation only
+    # Хэрэглэгч хүний тусламж хүссэн эсэхийг шалгах
+    if "хүнтэй холбогдох" in text.lower() or "хүн" in text.lower() or "оператор" in text.lower():
+        # Имэйл хаягаа өгөхийг хүсэх
+        response = "Хүний тусламж авахын тулд имэйл хаягаа оруулна уу. Бид таны имэйл хаягийг баталгаажуулсны дараа асуудлыг шийдвэрлэх болно."
+        send_to_chatwoot(conv_id, response)
+        return jsonify({"status": "success"}), 200
+    
+    # Имэйл хаяг оруулсан эсэхийг шалгах
+    if "@" in text and is_valid_email(text):
+        # Имэйл хаягийг баталгаажуулах код илгээх
+        verification_code = send_verification_email(text)
+        if verification_code:
+            # Баталгаажуулах кодыг хадгалах
+            if conv_id not in conversation_memory:
+                conversation_memory[conv_id] = []
+            conversation_memory[conv_id].append({"role": "system", "content": f"verification_code:{verification_code},email:{text}"})
+            
+            response = "Таны имэйл хаяг руу баталгаажуулах код илгээлээ. Уг кодыг оруулна уу."
+            send_to_chatwoot(conv_id, response)
+            return jsonify({"status": "success"}), 200
+        else:
+            response = "Имэйл илгээхэд алдаа гарлаа. Дахин оролдоно уу эсвэл өөр имэйл хаяг оруулна уу."
+            send_to_chatwoot(conv_id, response)
+            return jsonify({"status": "success"}), 200
+    
+    # Баталгаажуулах код оруулсан эсэхийг шалгах
+    if len(text) == 6 and text.isdigit():
+        # Хадгалсан баталгаажуулах кодыг шалгах
+        history = conversation_memory.get(conv_id, [])
+        verification_info = None
+        
+        for msg in history:
+            if msg.get("role") == "system" and "verification_code:" in msg.get("content", ""):
+                verification_info = msg.get("content")
+                break
+        
+        if verification_info:
+            # Баталгаажуулах код болон имэйл хаягийг задлах
+            parts = verification_info.split(",")
+            stored_code = parts[0].split(":")[1]
+            email = parts[1].split(":")[1]
+            
+            if text == stored_code:
+                # Код зөв байна, асуудлыг оруулахыг хүсэх
+                response = "Баталгаажуулалт амжилттай. Одоо асуудлаа дэлгэрэнгүй бичнэ үү."
+                send_to_chatwoot(conv_id, response)
+                
+                # Имэйл хаягийг хадгалах
+                conversation_memory[conv_id].append({"role": "system", "content": f"verified_email:{email}"})
+                return jsonify({"status": "success"}), 200
+            else:
+                response = "Баталгаажуулах код буруу байна. Дахин оролдоно уу."
+                send_to_chatwoot(conv_id, response)
+                return jsonify({"status": "success"}), 200
+    
+    # Баталгаажуулсан имэйл хаягтай хэрэглэгчийн асуудлыг Microsoft Teams-рүү илгээх
+    history = conversation_memory.get(conv_id, [])
+    verified_email = None
+    
+    for msg in history:
+        if msg.get("role") == "system" and "verified_email:" in msg.get("content", ""):
+            verified_email = msg.get("content").split(":")[1]
+            break
+    
+    if verified_email and len(text) > 10:  # Асуудал хангалттай урт байх ёстой
+        # Асуудлыг Microsoft Teams-рүү илгээх
+        success = send_to_teams(verified_email, text)
+        if success:
+            response = "Таны асуудлыг хүлээн авлаа. Бид тантай удахгүй холбогдох болно. Баярлалаа!"
+            send_to_chatwoot(conv_id, response)
+            return jsonify({"status": "success"}), 200
+    
+    # Хайлтын үр дүн байгаа эсэхийг шалгах
     ai_response = get_ai_response(text, conv_id, crawled_data)
+    
+    # Хайлтын үр дүн олдоогүй бол хэрэглэгчид хүний тусламж санал болгох
+    search_results = search_in_crawled_data(text, max_results=1)
+    if not search_results and "хүнтэй холбогдох" not in ai_response.lower():
+        ai_response += "\n\nХэрэв таны асуултад хариулт олдоогүй бол хүний тусламж авахыг хүсвэл 'Хүнтэй холбогдох' гэж бичнэ үү."
+    
     send_to_chatwoot(conv_id, ai_response)
-
     return jsonify({"status": "success"}), 200
 
 
@@ -581,7 +668,7 @@ def is_valid_email(email: str) -> bool:
 
 def send_verification_email(email: str) -> str:
     """Send verification email with code and return the code"""
-    if not SENDER_EMAIL or not SENDER_PASSWORD:
+    if not SMTP_FROM_EMAIL or not SMTP_PASSWORD or not SMTP_SERVER:
         logging.error("SMTP credentials not configured")
         return None
         
@@ -590,7 +677,7 @@ def send_verification_email(email: str) -> str:
     
     # Create email
     msg = MIMEMultipart()
-    msg['From'] = SENDER_EMAIL
+    msg['From'] = SMTP_FROM_EMAIL
     msg['To'] = email
     msg['Subject'] = "Cloud.mn баталгаажуулах код"
     
@@ -610,7 +697,7 @@ Cloud.mn Баг"""
     try:
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
-        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.login(SMTP_USERNAME, SMTP_PASSWORD)
         server.send_message(msg)
         server.quit()
         logging.info(f"Verification email sent to {email}")
