@@ -19,7 +19,8 @@ ALLOWED_NETLOC       = urlparse(ROOT_URL).netloc
 MAX_CRAWL_PAGES      = int(os.getenv("MAX_CRAWL_PAGES", "50"))
 CHATWOOT_API_KEY     = os.getenv("CHATWOOT_API_KEY")
 ACCOUNT_ID           = os.getenv("ACCOUNT_ID")
-CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://chat.cloud.mn/")
+# CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com")
+CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://chat.cloud.mn")
 OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
 AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true"
 
