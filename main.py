@@ -462,88 +462,152 @@ def chatwoot_webhook():
     
     logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
     
-    # Хэрэглэгч хүний тусламж хүссэн эсэхийг шалгах
-    if "хүнтэй холбогдох" in text.lower() or "хүн" in text.lower() or "оператор" in text.lower():
-        # Имэйл хаягаа өгөхийг хүсэх
-        response = "Хүний тусламж авахын тулд имэйл хаягаа оруулна уу. Бид таны имэйл хаягийг баталгаажуулсны дараа асуудлыг шийдвэрлэх болно."
-        send_to_chatwoot(conv_id, response)
-        return jsonify({"status": "success"}), 200
+    # Get conversation history
+    history = conversation_memory.get(conv_id, [])
     
-    # Имэйл хаяг оруулсан эсэхийг шалгах
-    if "@" in text and is_valid_email(text):
-        # Имэйл хаягийг баталгаажуулах код илгээх
-        verification_code = send_verification_email(text)
+    # Check if this is an email address
+    if "@" in text and is_valid_email(text.strip()):
+        verification_code = send_verification_email(text.strip())
         if verification_code:
-            # Баталгаажуулах кодыг хадгалах
             if conv_id not in conversation_memory:
                 conversation_memory[conv_id] = []
-            conversation_memory[conv_id].append({"role": "system", "content": f"verification_code:{verification_code},email:{text}"})
+            conversation_memory[conv_id].append({
+                "role": "system", 
+                "content": f"verification_code:{verification_code},email:{text.strip()}"
+            })
             
-            response = "Таны имэйл хаяг руу баталгаажуулах код илгээлээ. Уг кодыг оруулна уу."
+            response = "📧 Таны имэйл хаяг руу баталгаажуулах код илгээлээ. Уг кодыг оруулна уу."
             send_to_chatwoot(conv_id, response)
             return jsonify({"status": "success"}), 200
         else:
-            response = "Имэйл илгээхэд алдаа гарлаа. Дахин оролдоно уу эсвэл өөр имэйл хаяг оруулна уу."
+            response = "❌ Имэйл илгээхэд алдаа гарлаа. Дахин оролдоно уу эсвэл өөр имэйл хаяг оруулна уу."
             send_to_chatwoot(conv_id, response)
             return jsonify({"status": "success"}), 200
     
-    # Баталгаажуулах код оруулсан эсэхийг шалгах
+    # Check if this is a verification code (6 digits)
     if len(text) == 6 and text.isdigit():
-        # Хадгалсан баталгаажуулах кодыг шалгах
-        history = conversation_memory.get(conv_id, [])
         verification_info = None
-        
         for msg in history:
             if msg.get("role") == "system" and "verification_code:" in msg.get("content", ""):
                 verification_info = msg.get("content")
                 break
         
         if verification_info:
-            # Баталгаажуулах код болон имэйл хаягийг задлах
             parts = verification_info.split(",")
             stored_code = parts[0].split(":")[1]
             email = parts[1].split(":")[1]
             
             if text == stored_code:
-                # Код зөв байна, асуудлыг оруулахыг хүсэх
-                response = "Баталгаажуулалт амжилттай. Одоо асуудлаа дэлгэрэнгүй бичнэ үү."
+                response = "✅ Баталгаажуулалт амжилттай. Одоо асуудлаа дэлгэрэнгүй бичнэ үү."
                 send_to_chatwoot(conv_id, response)
                 
-                # Имэйл хаягийг хадгалах
-                conversation_memory[conv_id].append({"role": "system", "content": f"verified_email:{email}"})
+                conversation_memory[conv_id].append({
+                    "role": "system", 
+                    "content": f"verified_email:{email}"
+                })
                 return jsonify({"status": "success"}), 200
             else:
-                response = "Баталгаажуулах код буруу байна. Дахин оролдоно уу."
+                response = "❌ Баталгаажуулах код буруу байна. Дахин оролдоно уу."
                 send_to_chatwoot(conv_id, response)
                 return jsonify({"status": "success"}), 200
     
-    # Баталгаажуулсан имэйл хаягтай хэрэглэгчийн асуудлыг Microsoft Teams-рүү илгээх
-    history = conversation_memory.get(conv_id, [])
+    # Check if user has verified email and is describing an issue
     verified_email = None
-    
     for msg in history:
         if msg.get("role") == "system" and "verified_email:" in msg.get("content", ""):
             verified_email = msg.get("content").split(":")[1]
             break
     
-    if verified_email and len(text) > 10:  # Асуудал хангалттай урт байх ёстой
-        # Асуудлыг Microsoft Teams-рүү илгээх
+    if verified_email and len(text) > 15:  # User has verified email and writing detailed message
         success = send_to_teams(verified_email, text)
         if success:
-            response = "Таны асуудлыг хүлээн авлаа. Бид тантай удахгүй холбогдох болно. Баярлалаа!"
+            response = "✅ Таны асуудлыг хүлээн авлаа. Бид тантай удахгүй холбогдох болно. Баярлалаа!"
             send_to_chatwoot(conv_id, response)
             return jsonify({"status": "success"}), 200
     
-    # Хайлтын үр дүн байгаа эсэхийг шалгах
+    # Try to answer with AI first
     ai_response = get_ai_response(text, conv_id, crawled_data)
     
-    # Хайлтын үр дүн олдоогүй бол хэрэглэгчид хүний тусламж санал болгох
+    # Check if AI couldn't find good answer by searching crawled data
     search_results = search_in_crawled_data(text, max_results=1)
-    if not search_results and "хүнтэй холбогдох" not in ai_response.lower():
-        ai_response += "\n\nХэрэв таны асуултад хариулт олдоогүй бол хүний тусламж авахыг хүсвэл 'Хүнтэй холбогдох' гэж бичнэ үү."
     
-    send_to_chatwoot(conv_id, ai_response)
+    # AI automatically determines if human help is needed based on:
+    # 1. No search results found
+    # 2. Question seems complex or specific
+    # 3. User seems frustrated or unsatisfied
+    needs_human_help = should_escalate_to_human(text, search_results, ai_response, history)
+    
+    if needs_human_help and not verified_email:
+        escalation_response = """🤝 Таны асуултад AI-аар хариулахад хэцүү байна. Хүний тусламж авахыг санал болгож байна.
+
+Хүний тусламж авахын тулд имэйл хаягаа оруулна уу. Бид таны имэйл хаягийг баталгаажуулсны дараа асуудлыг шийдвэрлэх болно."""
+        
+        send_to_chatwoot(conv_id, escalation_response)
+    else:
+        send_to_chatwoot(conv_id, ai_response)
+
     return jsonify({"status": "success"}), 200
+
+
+def should_escalate_to_human(user_message: str, search_results: list, ai_response: str, history: list) -> bool:
+    """AI determines if human help is needed based on context"""
+    
+    # Check if no relevant search results found
+    if not search_results:
+        return True
+    
+    # Check if search results have very low relevance
+    if search_results and search_results[0].get('relevance_score', 0) < 2:
+        return True
+    
+    # Use AI to determine if human help is needed
+    if not client:
+        return False  # If no OpenAI client, don't escalate
+    
+    # Build context for AI decision
+    context = f"""Хэрэглэгчийн мессеж: "{user_message}"
+Хайлтын үр дүн олдсон: {'Тийм' if search_results else 'Үгүй'}
+AI хариулт: "{ai_response[:200]}..."
+
+Ярилцлагын түүх:"""
+    
+    if history:
+        recent_messages = [msg.get("content", "")[:100] for msg in history[-3:] if msg.get("role") == "user"]
+        context += "\n" + "\n".join(recent_messages)
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """Та хэрэглэгчийн хүсэлтийг шинжилж, хүний тусламж хэрэгтэй эсэхийг тодорхойлдог. 
+                    
+Дараах тохиолдлуудад хүний тусламж хэрэгтэй:
+- Техникийн асуудал, алдаа, тохиргоо
+- AI хариулт хангалтгүй, тохиромжгүй
+- Хэрэглэгч сэтгэл дундуур, эргэлзэж байгаа
+- Тусгай үйлчилгээ, өөрчлөлт хүсэж байгаа
+- Гомдол, санал гэх мэт
+
+Хариултаа зөвхөн 'YES' эсвэл 'NO' гэж өгнө үү."""
+                },
+                {
+                    "role": "user", 
+                    "content": context
+                }
+            ],
+            max_tokens=10,
+            temperature=0.3
+        )
+        
+        ai_decision = response.choices[0].message.content.strip().upper()
+        return ai_decision == "YES"
+        
+    except Exception as e:
+        logging.error(f"AI escalation decision error: {e}")
+        # Fallback logic if AI fails
+        return len(user_message) > 30 and not search_results
 
 
 # —— Additional API Endpoints —— #
