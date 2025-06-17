@@ -395,10 +395,7 @@ def send_to_teams(email: str, issue: str) -> bool:
             "activityTitle": "Cloud.mn - Шинэ хүсэлт",
             "activitySubtitle": f"Хэрэглэгч: {email}",
             "activityImage": "https://docs.cloud.mn/logo.png",
-            "facts": [{
-                "name": "Хэрэглэгч:",
-                "value": email
-            }, {
+            "facts": [ {
                 "name": "Асуудал:",
                 "value": issue
             }, {
@@ -531,60 +528,43 @@ def chatwoot_webhook():
     # Check if AI couldn't find good answer by searching crawled data
     search_results = search_in_crawled_data(text, max_results=3)
     
-    # If we have good search results, try to answer with AI using that context
-    if search_results and search_results[0].get('relevance_score', 0) >= 2:
-        # Манай баримт бичгээс олдсон, AI хариулна
-        send_to_chatwoot(conv_id, ai_response)
-        return jsonify({"status": "success"}), 200
-    
-    # No good results found in crawled data OR user needs different service
-    # Let AI decide if this needs human help
+    # Let AI evaluate its own response quality and decide if human help is needed
     needs_human_help = should_escalate_to_human(text, search_results, ai_response, history)
     
     if needs_human_help and not verified_email:
-        escalation_response = """🤝 Таны асуултад манай баримт бичгээс хариулт олдсонгүй эсвэл өөр үйлчилгээ хэрэгтэй байна. 
+        # AI thinks it can't handle this properly, escalate to human
+        escalation_response = """🤝 Би таны асуултад хангалттай хариулт өгч чадахгүй байна. Дэмжлэгийн багийн тусламж авахыг санал болгож байна.
 
-Хүний тусламж авахын тулд имэйл хаягаа оруулна уу. Бид таны имэйл хаягийг баталгаажуулсны дараа асуудлыг шийдвэрлэх болно."""
+Тусламж авахын тулд имэйл хаягаа оруулна уу. Бид таны имэйл хаягийг баталгаажуулсны дараа асуудлыг шийдвэрлэх болно."""
         
         send_to_chatwoot(conv_id, escalation_response)
     else:
-        # Send AI response even if search results are weak
+        # AI is confident in its response, send it
         send_to_chatwoot(conv_id, ai_response)
 
     return jsonify({"status": "success"}), 200
 
 
 def should_escalate_to_human(user_message: str, search_results: list, ai_response: str, history: list) -> bool:
-    """AI determines if human help is needed based on context"""
+    """AI evaluates its own response and decides if human help is needed"""
     
-    # If no crawled data available at all, escalate
-    if not crawled_data:
-        return True
-    
-    # Check if no relevant search results found in our crawled data
-    if not search_results:
-        return True
-    
-    # Check if search results have very low relevance score
-    if search_results and search_results[0].get('relevance_score', 0) < 2:
-        return True
-    
-    # Use AI to determine if this is a request for different services
+    # Use AI to evaluate its own response quality
     if not client:
-        return False  # If no OpenAI client, don't escalate
+        # Fallback without AI evaluation
+        return not search_results or (search_results and search_results[0].get('relevance_score', 0) < 2)
     
-    # Build context for AI decision
-    context = f"""Хэрэглэгчийн мессеж: "{user_message}"
+    # Build context for AI self-evaluation
+    context = f"""Хэрэглэгчийн асуулт: "{user_message}"
 
-Манай баримт бичгээс олсон хайлтын үр дүн:
-{f"Олдсон: {len(search_results)} үр дүн, хамгийн сайн оноо: {search_results[0].get('relevance_score', 0)}" if search_results else "Олдсонгүй"}
+Манай баримт бичгээс хайсан үр дүн:
+{f"Олдсон: {len(search_results)} үр дүн, хамгийн сайн оноо: {search_results[0].get('relevance_score', 0)}" if search_results else "Мэдээлэл олдсонгүй"}
 
-AI хариулт: "{ai_response[:150]}..."
+Миний өгсөн хариулт: "{ai_response}"
 
 Ярилцлагын сүүлийн мессежүүд:"""
     
     if history:
-        recent_messages = [msg.get("content", "")[:80] for msg in history[-2:] if msg.get("role") == "user"]
+        recent_messages = [msg.get("content", "")[:100] for msg in history[-2:] if msg.get("role") == "user"]
         if recent_messages:
             context += "\n" + "\n".join(recent_messages)
     
@@ -594,16 +574,18 @@ AI хариулт: "{ai_response[:150]}..."
             messages=[
                 {
                     "role": "system",
-                    "content": """Та хэрэглэгчийн хүсэлтийг шинжилж, манай баримт бичгээс олдохгүй эсвэл өөр үйлчилгээ хэрэгтэй эсэхийг тодорхойлдог.
+                    "content": """Та өөрийн өгсөн хариултыг үнэлж, хэрэглэгчид хангалттай эсэхийг шийднэ.
 
 Дараах тохиолдлуудад хүний тусламж шаардлагатай:
-- Манай баримт бичгээс хариулт олдохгүй байгаа
-- Cloud.mn-ээс өөр үйлчилгээ хүсэж байгаа (хостинг, домэйн, техникийн дэмжлэг гэх мэт)
-- Акаунт, төлбөр, тохиргооны асуудал
-- Гомдол, санал хүсэлт
-- Тусгай хүсэлт, өөрчлөлт
+- Хэрэглэгчийн асуултад тодорхой хариулт өгч чадаагүй
+- Баримт бичгээс хангалттай мэдээлэл олдоогүй  
+- Техникийн алдаа, тохиргоо, акаунтын асуудал
+- Cloud.mn-ээс өөр үйлчилгээ хүсэж байгаа (хостинг, домэйн гэх мэт)
+- Тусгай хүсэлт, гомдол, санал
+- Хариулт ерөнхий, тодорхойгүй байгаа
 
-Хэрэв манай баримт бичгээс хангалттай мэдээлэл олдсон бол 'NO'.
+Хэрэв хэрэглэгчийн асуултад хангалттай, тодорхой хариулт өгсөн бол 'NO'.
+Хэрэв хариулт хангалтгүй эсвэл хүний тусламж хэрэгтэй бол 'YES'.
 
 Хариултаа зөвхөн 'YES' эсвэл 'NO' гэж өгнө үү."""
                 },
@@ -613,14 +595,15 @@ AI хариулт: "{ai_response[:150]}..."
                 }
             ],
             max_tokens=10,
-            temperature=0.2
+            temperature=0.1
         )
         
         ai_decision = response.choices[0].message.content.strip().upper()
+        logging.info(f"AI self-evaluation for conv {user_message[:50]}...: {ai_decision}")
         return ai_decision == "YES"
         
     except Exception as e:
-        logging.error(f"AI escalation decision error: {e}")
+        logging.error(f"AI self-evaluation error: {e}")
         # Fallback: escalate if no good search results
         return not search_results or (search_results and search_results[0].get('relevance_score', 0) < 2)
 
@@ -766,7 +749,7 @@ def send_verification_email(email: str) -> str:
 
 {verification_code}
 
-Хэрэв та энэ хүсэлтийг илгээгээгүй бол энэ имэйлийг үл тоомсорлоно уу.
+Хэрэв та энэ хүсэлтийг илгээгээгүй бол мэдэгдэнэ үү.
 
 Хүндэтгэсэн,
 Cloud.mn Баг"""
