@@ -529,21 +529,26 @@ def chatwoot_webhook():
     ai_response = get_ai_response(text, conv_id, crawled_data)
     
     # Check if AI couldn't find good answer by searching crawled data
-    search_results = search_in_crawled_data(text, max_results=1)
+    search_results = search_in_crawled_data(text, max_results=3)
     
-    # AI automatically determines if human help is needed based on:
-    # 1. No search results found
-    # 2. Question seems complex or specific
-    # 3. User seems frustrated or unsatisfied
+    # If we have good search results, try to answer with AI using that context
+    if search_results and search_results[0].get('relevance_score', 0) >= 2:
+        # Манай баримт бичгээс олдсон, AI хариулна
+        send_to_chatwoot(conv_id, ai_response)
+        return jsonify({"status": "success"}), 200
+    
+    # No good results found in crawled data OR user needs different service
+    # Let AI decide if this needs human help
     needs_human_help = should_escalate_to_human(text, search_results, ai_response, history)
     
     if needs_human_help and not verified_email:
-        escalation_response = """🤝 Таны асуултад AI-аар хариулахад хэцүү байна. Хүний тусламж авахыг санал болгож байна.
+        escalation_response = """🤝 Таны асуултад манай баримт бичгээс хариулт олдсонгүй эсвэл өөр үйлчилгээ хэрэгтэй байна. 
 
 Хүний тусламж авахын тулд имэйл хаягаа оруулна уу. Бид таны имэйл хаягийг баталгаажуулсны дараа асуудлыг шийдвэрлэх болно."""
         
         send_to_chatwoot(conv_id, escalation_response)
     else:
+        # Send AI response even if search results are weak
         send_to_chatwoot(conv_id, ai_response)
 
     return jsonify({"status": "success"}), 200
@@ -552,28 +557,36 @@ def chatwoot_webhook():
 def should_escalate_to_human(user_message: str, search_results: list, ai_response: str, history: list) -> bool:
     """AI determines if human help is needed based on context"""
     
-    # Check if no relevant search results found
+    # If no crawled data available at all, escalate
+    if not crawled_data:
+        return True
+    
+    # Check if no relevant search results found in our crawled data
     if not search_results:
         return True
     
-    # Check if search results have very low relevance
+    # Check if search results have very low relevance score
     if search_results and search_results[0].get('relevance_score', 0) < 2:
         return True
     
-    # Use AI to determine if human help is needed
+    # Use AI to determine if this is a request for different services
     if not client:
         return False  # If no OpenAI client, don't escalate
     
     # Build context for AI decision
     context = f"""Хэрэглэгчийн мессеж: "{user_message}"
-Хайлтын үр дүн олдсон: {'Тийм' if search_results else 'Үгүй'}
-AI хариулт: "{ai_response[:200]}..."
 
-Ярилцлагын түүх:"""
+Манай баримт бичгээс олсон хайлтын үр дүн:
+{f"Олдсон: {len(search_results)} үр дүн, хамгийн сайн оноо: {search_results[0].get('relevance_score', 0)}" if search_results else "Олдсонгүй"}
+
+AI хариулт: "{ai_response[:150]}..."
+
+Ярилцлагын сүүлийн мессежүүд:"""
     
     if history:
-        recent_messages = [msg.get("content", "")[:100] for msg in history[-3:] if msg.get("role") == "user"]
-        context += "\n" + "\n".join(recent_messages)
+        recent_messages = [msg.get("content", "")[:80] for msg in history[-2:] if msg.get("role") == "user"]
+        if recent_messages:
+            context += "\n" + "\n".join(recent_messages)
     
     try:
         response = client.chat.completions.create(
@@ -581,14 +594,16 @@ AI хариулт: "{ai_response[:200]}..."
             messages=[
                 {
                     "role": "system",
-                    "content": """Та хэрэглэгчийн хүсэлтийг шинжилж, хүний тусламж хэрэгтэй эсэхийг тодорхойлдог. 
-                    
-Дараах тохиолдлуудад хүний тусламж хэрэгтэй:
-- Техникийн асуудал, алдаа, тохиргоо
-- AI хариулт хангалтгүй, тохиромжгүй
-- Хэрэглэгч сэтгэл дундуур, эргэлзэж байгаа
-- Тусгай үйлчилгээ, өөрчлөлт хүсэж байгаа
-- Гомдол, санал гэх мэт
+                    "content": """Та хэрэглэгчийн хүсэлтийг шинжилж, манай баримт бичгээс олдохгүй эсвэл өөр үйлчилгээ хэрэгтэй эсэхийг тодорхойлдог.
+
+Дараах тохиолдлуудад хүний тусламж шаардлагатай:
+- Манай баримт бичгээс хариулт олдохгүй байгаа
+- Cloud.mn-ээс өөр үйлчилгээ хүсэж байгаа (хостинг, домэйн, техникийн дэмжлэг гэх мэт)
+- Акаунт, төлбөр, тохиргооны асуудал
+- Гомдол, санал хүсэлт
+- Тусгай хүсэлт, өөрчлөлт
+
+Хэрэв манай баримт бичгээс хангалттай мэдээлэл олдсон бол 'NO'.
 
 Хариултаа зөвхөн 'YES' эсвэл 'NO' гэж өгнө үү."""
                 },
@@ -598,7 +613,7 @@ AI хариулт: "{ai_response[:200]}..."
                 }
             ],
             max_tokens=10,
-            temperature=0.3
+            temperature=0.2
         )
         
         ai_decision = response.choices[0].message.content.strip().upper()
@@ -606,8 +621,8 @@ AI хариулт: "{ai_response[:200]}..."
         
     except Exception as e:
         logging.error(f"AI escalation decision error: {e}")
-        # Fallback logic if AI fails
-        return len(user_message) > 30 and not search_results
+        # Fallback: escalate if no good search results
+        return not search_results or (search_results and search_results[0].get('relevance_score', 0) < 2)
 
 
 # —— Additional API Endpoints —— #
