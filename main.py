@@ -19,8 +19,7 @@ ALLOWED_NETLOC       = urlparse(ROOT_URL).netloc
 MAX_CRAWL_PAGES      = int(os.getenv("MAX_CRAWL_PAGES", "50"))
 CHATWOOT_API_KEY     = os.getenv("CHATWOOT_API_KEY")
 ACCOUNT_ID           = os.getenv("ACCOUNT_ID")
-# CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com")
-CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://chat.cloud.mn")
+CHATWOOT_BASE_URL    = os.getenv("CHATWOOT_BASE_URL", "https://app.chatwoot.com")
 OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY")
 AUTO_CRAWL_ON_START  = os.getenv("AUTO_CRAWL_ON_START", "true").lower() == "true"
 
@@ -186,7 +185,11 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     3. Хариултаа бүтэцтэй, цэгцтэй байлгаарай
     4. Техникийн нэр томъёог монгол хэлээр тайлбарлаарай
     
-    Та хэрэглэгчийн асуултад шууд хариулж, тусламж үзүүлээрэй. Ямар нэгэн тусгай команд шаардахгүй."""
+    Боломжит командууд:
+    - crawl: Бүх сайтыг шүүрдэх
+    - scrape <URL>: Тодорхой хуудсыг шүүрдэх  
+    - help: Тусламж харуулах
+    - search <асуулт>: Мэдээлэл хайх"""
     
     if context:
         system_content += f"\n\nКонтекст мэдээлэл:\n{context}"
@@ -231,7 +234,7 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         
     except Exception as e:
         logging.error(f"OpenAI API алдаа: {e}")
-        return f"🔧 AI-тай холбогдоход саад гарлаа. Дахин оролдоно уу эсвэл админтай холбогдоно уу.\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
+        return f"🔧 AI-тай холбогдоход саад гарлаа. Та дараах аргуудаар тусламж авч болно:\n• 'help' командыг ашиглана уу\n• 'crawl' эсвэл 'search' командуудыг туршина уу\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
 
 def search_in_crawled_data(query: str, max_results: int = 3):
     """Enhanced search through crawled data with better relevance scoring"""
