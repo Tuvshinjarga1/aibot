@@ -380,11 +380,14 @@ def mark_conversation_resolved(conv_id: int):
 
 
 # —— Microsoft Teams Integration —— #
-def send_to_teams(email: str, issue: str) -> bool:
+def send_to_teams(email: str, issue: str, conv_id: int = None) -> bool:
     """Send issue to Microsoft Teams via webhook"""
     if not TEAMS_WEBHOOK_URL:
         logging.error("Teams webhook URL not configured")
         return False
+    
+    # Build Chatwoot conversation link
+    chatwoot_link = f"{CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conv_id}" if conv_id else "Линк байхгүй"
         
     payload = {
         "@type": "MessageCard",
@@ -393,16 +396,30 @@ def send_to_teams(email: str, issue: str) -> bool:
         "summary": f"Шинэ хүсэлт: {email}",
         "sections": [{
             "activityTitle": "Cloud.mn - Шинэ хүсэлт",
-            "activitySubtitle": f"Хэрэглэгч: {email}",
+            # "activitySubtitle": f"Хэрэглэгч: {email}",
             "activityImage": "https://docs.cloud.mn/logo.png",
-            "facts": [ {
+            "facts": [{
+                "name": "Хэрэглэгч:",
+                "value": email
+            }, {
                 "name": "Асуудал:",
                 "value": issue
+            }, {
+                "name": "Chatwoot ярилцлага:",
+                "value": f"[Ярилцлага харах]({chatwoot_link})"
             }, {
                 "name": "Огноо:",
                 "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }],
             "markdown": True
+        }],
+        "potentialAction": [{
+            "@type": "OpenUri",
+            "name": "Chatwoot-д харах",
+            "targets": [{
+                "os": "default",
+                "uri": chatwoot_link
+            }]
         }]
     }
     
@@ -414,7 +431,7 @@ def send_to_teams(email: str, issue: str) -> bool:
             timeout=10
         )
         response.raise_for_status()
-        logging.info(f"Issue sent to Teams for {email}")
+        logging.info(f"Issue sent to Teams for {email} with conv link: {chatwoot_link}")
         return True
     except Exception as e:
         logging.error(f"Failed to send to Teams: {e}")
@@ -516,7 +533,7 @@ def chatwoot_webhook():
             break
     
     if verified_email and len(text) > 15:  # User has verified email and writing detailed message
-        success = send_to_teams(verified_email, text)
+        success = send_to_teams(verified_email, text, conv_id)
         if success:
             response = "✅ Таны асуудлыг хүлээн авлаа. Бид тантай удахгүй холбогдох болно. Баярлалаа!"
             send_to_chatwoot(conv_id, response)
