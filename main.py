@@ -13,6 +13,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import re
 import random
+from typing import Dict, Optional
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -39,6 +40,13 @@ SMTP_FROM_EMAIL      = os.getenv("SENDER_EMAIL")
 # Microsoft Teams webhook
 TEAMS_WEBHOOK_URL    = os.getenv("TEAMS_WEBHOOK_URL")
 
+# Microsoft Planner тохиргоо
+PLANNER_TENANT_ID    = os.getenv("PLANNER_TENANT_ID", "3fee1c11-7cdf-44b4-a1b0-5183408e1d89")
+PLANNER_CLIENT_ID    = os.getenv("PLANNER_CLIENT_ID", "a6e958a7-e8df-4e83-a8c2-5dc73f93bdc4")
+PLANNER_CLIENT_SECRET = os.getenv("PLANNER_CLIENT_SECRET", "0gr8Q~59DdnB4H-NzAY1tQdgWo2bwWRlVjtKpc.K")
+PLANNER_PLAN_ID      = os.getenv("PLANNER_PLAN_ID", "axc-dEI6jEWbTNh2coGlHckAGzrw")
+PLANNER_BUCKET_ID    = os.getenv("PLANNER_BUCKET_ID", "hiqnSTkaQUag8zIP2YiiKckALOhy")
+
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -46,6 +54,122 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 conversation_memory = {}
 crawled_data = []
 crawl_status = {"status": "not_started", "message": "Crawling has not started yet"}
+
+# —— Microsoft Planner Integration —— #
+_cached_token = None
+_token_expiry = 0  # UNIX timestamp
+
+def get_planner_access_token() -> str:
+    """Microsoft Planner-ийн access token авах"""
+    global _cached_token, _token_expiry
+
+    # Хэрвээ token хүчинтэй байвал cache-аас буцаана
+    if _cached_token and time.time() < _token_expiry - 10:
+        return _cached_token
+
+    url = f"https://login.microsoftonline.com/{PLANNER_TENANT_ID}/oauth2/v2.0/token"
+    headers = { "Content-Type": "application/x-www-form-urlencoded" }
+    data = {
+        "client_id": PLANNER_CLIENT_ID,
+        "client_secret": PLANNER_CLIENT_SECRET,
+        "scope": "https://graph.microsoft.com/.default",
+        "grant_type": "client_credentials"
+    }
+
+    try:
+        response = requests.post(url, headers=headers, data=data, timeout=10)
+        if response.status_code != 200:
+            logging.error(f"Planner access token авахад алдаа: {response.status_code} - {response.text}")
+            return None
+
+        token_data = response.json()
+        _cached_token = token_data["access_token"]
+        _token_expiry = time.time() + token_data.get("expires_in", 3600)
+        
+        logging.info("Planner access token амжилттай авлаа")
+        return _cached_token
+        
+    except Exception as e:
+        logging.error(f"Planner access token авахад алдаа гарлаа: {e}")
+        return None
+
+class MicrosoftPlannerAPI:
+    def __init__(self, access_token: str):
+        self.base_url = "https://graph.microsoft.com/v1.0"
+        self.headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+
+    def create_task(self, plan_id: str, bucket_id: str, title: str,
+                    due_date: Optional[str] = None, priority: int = 5,
+                    assigned_user_id: Optional[str] = None) -> Dict:
+        """Microsoft Planner-д шинэ task үүсгэх"""
+        url = f"{self.base_url}/planner/tasks/"
+        data = {
+            "planId": plan_id,
+            "bucketId": bucket_id,
+            "title": title,
+            "priority": priority
+        }
+
+        if due_date:
+            data["dueDateTime"] = due_date
+    
+        if assigned_user_id:
+            data["assignments"] = {
+                assigned_user_id: {
+                    "@odata.type": "#microsoft.graph.plannerAssignment",
+                    "orderHint": " !"
+                }
+            }
+
+        try:
+            response = requests.post(url, headers=self.headers, json=data, timeout=10)
+            return response.json()
+        except Exception as e:
+            logging.error(f"Planner task үүсгэхэд алдаа гарлаа: {e}")
+            return {"error": str(e)}
+
+def create_planner_task(email: str, issue: str, conv_id: int = None) -> bool:
+    """Microsoft Planner-д task үүсгэх"""
+    if not all([PLANNER_TENANT_ID, PLANNER_CLIENT_ID, PLANNER_CLIENT_SECRET, PLANNER_PLAN_ID, PLANNER_BUCKET_ID]):
+        logging.error("Microsoft Planner тохиргоо дутуу байна")
+        return False
+        
+    try:
+        # Access token авах
+        token = get_planner_access_token()
+        if not token:
+            logging.error("Planner access token авч чадсангүй")
+            return False
+            
+        # Planner API instance үүсгэх
+        planner = MicrosoftPlannerAPI(token)
+        
+        # Task title үүсгэх (buten.py форматтайгаар)
+        issue_preview = issue[:50] + "..." if len(issue) > 50 else issue
+        title = f"{email} --> {issue_preview}"
+        
+        # Task үүсгэх
+        result = planner.create_task(
+            plan_id=PLANNER_PLAN_ID,
+            bucket_id=PLANNER_BUCKET_ID,
+            title=title,
+            priority=1  # Өндөр ач холбогдол
+        )
+        
+        if "error" not in result and result.get("id"):
+            task_id = result.get("id")
+            logging.info(f"Microsoft Planner task амжилттай үүсгэлээ: {task_id} - {email}")
+            return True
+        else:
+            logging.error(f"Planner task үүсгэх амжилтгүй: {result}")
+            return False
+            
+    except Exception as e:
+        logging.error(f"Planner task үүсгэхэд алдаа гарлаа: {e}")
+        return False
 
 # —— Crawl & Scrape —— #
 def crawl_and_scrape(start_url: str):
@@ -533,12 +657,25 @@ def chatwoot_webhook():
             break
     
     if verified_email and len(text) > 15:  # User has verified email and writing detailed message
-        success = send_to_teams(verified_email, text, conv_id)
-        if success:
+        teams_success = send_to_teams(verified_email, text, conv_id)
+        planner_success = create_planner_task(verified_email, text, conv_id)
+        
+        if teams_success or planner_success:
             # Send confirmation email to user
             confirmation_sent = send_confirmation_email(verified_email, text[:100] + "..." if len(text) > 100 else text)
             
-            response = "✅ Таны асуудлыг хүлээн авлаа. Бид тантай удахгүй холбогдох болно. Баярлалаа!"
+            status_msg = ""
+            if teams_success and planner_success:
+                status_msg = "✅ Таны асуудлыг Teams болон Planner-д амжилттай илгээлээ."
+            elif teams_success:
+                status_msg = "✅ Таны асуудлыг Teams-д амжилттай илгээлээ."
+            elif planner_success:
+                status_msg = "✅ Таны асуудлыг Planner-д амжилттай илгээлээ."
+            else:
+                status_msg = "⚠️ Таны асуудлыг хүлээн авлаа."
+                
+            response = f"{status_msg} Бид тантай удахгүй холбогдох болно. Баярлалаа!"
+            
             if confirmation_sent:
                 response += "\n📧 Танд баталгаажуулах мэйл илгээлээ."
             send_to_chatwoot(conv_id, response)
@@ -745,6 +882,35 @@ def get_crawled_data():
         "data": crawled_data[:page_limit]
     })
 
+@app.route("/api/planner/create-task", methods=["POST"])
+def api_create_planner_task():
+    """Manual-аар Microsoft Planner-д task үүсгэх API"""
+    data = request.get_json(force=True)
+    email = data.get("email", "").strip()
+    issue = data.get("issue", "").strip()
+    conv_id = data.get("conversation_id")
+    
+    if not email or not issue:
+        return jsonify({"error": "Имэйл болон асуудал заавал шаардлагатай"}), 400
+    
+    if not is_valid_email(email):
+        return jsonify({"error": "Имэйл хаягийн формат буруу байна"}), 400
+    
+    success = create_planner_task(email, issue, conv_id)
+    
+    if success:
+        return jsonify({
+            "status": "success",
+            "message": "Microsoft Planner-д task амжилттай үүсгэлээ",
+            "email": email,
+            "issue_preview": issue[:100] + "..." if len(issue) > 100 else issue
+        })
+    else:
+        return jsonify({
+            "status": "error", 
+            "message": "Microsoft Planner-д task үүсгэх амжилтгүй боллоо"
+        }), 500
+
 @app.route("/health", methods=["GET"])
 def health_check():
     """Health check endpoint"""
@@ -758,7 +924,10 @@ def health_check():
             "root_url": ROOT_URL,
             "auto_crawl_enabled": AUTO_CRAWL_ON_START,
             "openai_configured": client is not None,
-            "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID)
+            "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID),
+            "teams_configured": bool(TEAMS_WEBHOOK_URL),
+            "planner_configured": bool(PLANNER_TENANT_ID and PLANNER_CLIENT_ID and PLANNER_CLIENT_SECRET and PLANNER_PLAN_ID and PLANNER_BUCKET_ID),
+            "smtp_configured": bool(SMTP_SERVER and SMTP_USERNAME and SMTP_PASSWORD)
         }
     })
 
