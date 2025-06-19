@@ -535,7 +535,12 @@ def chatwoot_webhook():
     if verified_email and len(text) > 15:  # User has verified email and writing detailed message
         success = send_to_teams(verified_email, text, conv_id)
         if success:
+            # Send confirmation email to user
+            confirmation_sent = send_confirmation_email(verified_email, text[:100] + "..." if len(text) > 100 else text)
+            
             response = "✅ Таны асуудлыг хүлээн авлаа. Бид тантай удахгүй холбогдох болно. Баярлалаа!"
+            if confirmation_sent:
+                response += "\n📧 Танд баталгаажуулах мэйл илгээлээ."
             send_to_chatwoot(conv_id, response)
             return jsonify({"status": "success"}), 200
     
@@ -784,3 +789,38 @@ Cloud.mn Баг"""
     except Exception as e:
         logging.error(f"Failed to send verification email: {e}")
         return None
+
+def send_confirmation_email(email: str, problem: str) -> bool:
+    """Send confirmation email after issue is sent to support team"""
+    if not SMTP_FROM_EMAIL or not SMTP_PASSWORD or not SMTP_SERVER:
+        logging.error("SMTP credentials not configured")
+        return False
+        
+    # Create email
+    msg = MIMEMultipart()
+    msg['From'] = SMTP_FROM_EMAIL
+    msg['To'] = email
+    msg['Subject'] = "Cloud.mn - Таны хүсэлтийг хүлээн авлаа"
+    
+    body = f"""Сайн байна уу,
+
+Таны "{problem}" асуудлыг дэмжлэгийн багт амжилттай илгээлээ.
+
+Бид таны хүсэлтийг хүлээн авч, удахгүй танд хариу өгөх болно. Та нэмэлт мэдээлэл шаардлагатай бол манай багтай холбогдоно уу.
+
+Хүндэтгэсэн,
+Cloud.mn Дэмжлэгийн Баг"""
+    
+    msg.attach(MIMEText(body, 'plain'))
+    
+    try:
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        logging.info(f"Confirmation email sent to {email}")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to send confirmation email: {e}")
+        return False
