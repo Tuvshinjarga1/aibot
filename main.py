@@ -550,10 +550,31 @@ def chatwoot_webhook():
     # Check if AI couldn't find good answer by searching crawled data
     search_results = search_in_crawled_data(text, max_results=3)
     
+    # Check if this user was previously escalated but asking a new question
+    was_previously_escalated = any(
+        msg.get("role") == "system" and "escalated_to_human" in msg.get("content", "")
+        for msg in history
+    )
+    
     # Let AI evaluate its own response quality and decide if human help is needed
     needs_human_help = should_escalate_to_human(text, search_results, ai_response, history)
     
+    # If user was previously escalated but AI can answer this new question, respond with AI
+    if was_previously_escalated and not needs_human_help:
+        # AI can handle this new question even though user was escalated before
+        response_with_note = f"{ai_response}\n\n💡 Хэрэв энэ хариулт хангалтгүй бол, имэйл хаягаа оруулж дэмжлэгийн багтай холбогдоно уу."
+        send_to_chatwoot(conv_id, response_with_note)
+        return jsonify({"status": "success"}), 200
+    
     if needs_human_help and not verified_email:
+        # Mark this conversation as escalated
+        if conv_id not in conversation_memory:
+            conversation_memory[conv_id] = []
+        conversation_memory[conv_id].append({
+            "role": "system", 
+            "content": "escalated_to_human"
+        })
+        
         # AI thinks it can't handle this properly, escalate to human
         escalation_response = """🤝 Би таны асуултад хангалттай хариулт өгч чадахгүй байна. Дэмжлэгийн багийн тусламж авахыг санал болгож байна.
 
