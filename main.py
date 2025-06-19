@@ -41,11 +41,11 @@ SMTP_FROM_EMAIL      = os.getenv("SENDER_EMAIL")
 TEAMS_WEBHOOK_URL    = os.getenv("TEAMS_WEBHOOK_URL")
 
 # Microsoft Planner тохиргоо
-PLANNER_TENANT_ID    = os.getenv("PLANNER_TENANT_ID", "3fee1c11-7cdf-44b4-a1b0-5183408e1d89")
-PLANNER_CLIENT_ID    = os.getenv("PLANNER_CLIENT_ID", "a6e958a7-e8df-4e83-a8c2-5dc73f93bdc4")
-PLANNER_CLIENT_SECRET = os.getenv("PLANNER_CLIENT_SECRET", "0gr8Q~59DdnB4H-NzAY1tQdgWo2bwWRlVjtKpc.K")
-PLANNER_PLAN_ID      = os.getenv("PLANNER_PLAN_ID", "axc-dEI6jEWbTNh2coGlHckAGzrw")
-PLANNER_BUCKET_ID    = os.getenv("PLANNER_BUCKET_ID", "hiqnSTkaQUag8zIP2YiiKckALOhy")
+PLANNER_TENANT_ID    = os.getenv("PLANNER_TENANT_ID")
+PLANNER_CLIENT_ID    = os.getenv("PLANNER_CLIENT_ID")
+PLANNER_CLIENT_SECRET = os.getenv("PLANNER_CLIENT_SECRET")
+PLANNER_PLAN_ID      = os.getenv("PLANNER_PLAN_ID")
+PLANNER_BUCKET_ID    = os.getenv("PLANNER_BUCKET_ID")
 
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
