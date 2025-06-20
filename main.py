@@ -116,13 +116,23 @@ class MicrosoftPlannerAPI:
         if due_date:
             data["dueDateTime"] = due_date
     
-        if assigned_user_id:
-            data["assignments"] = {
-                assigned_user_id: {
-                    "@odata.type": "#microsoft.graph.plannerAssignment",
-                    "orderHint": " !"
-                }
+        # Bulgantamir-ийг үргэлж нэмэх
+        bulgantamir_user_id = "c64d22c4-5210-4132-8ad3-776ce1996b6c"
+        assignments = {
+            bulgantamir_user_id: {
+                "@odata.type": "#microsoft.graph.plannerAssignment",
+                "orderHint": " !"
             }
+        }
+        
+        # Хэрэв нэмэлт хүн байвал тэрийг бас нэмэх
+        if assigned_user_id and assigned_user_id != bulgantamir_user_id:
+            assignments[assigned_user_id] = {
+                "@odata.type": "#microsoft.graph.plannerAssignment",
+                "orderHint": " !"
+            }
+        
+        data["assignments"] = assignments
 
         try:
             response = requests.post(url, headers=self.headers, json=data, timeout=10)
@@ -151,7 +161,7 @@ def create_planner_task(email: str, issue: str, conv_id: int = None) -> bool:
         issue_preview = issue[:50] + "..." if len(issue) > 50 else issue
         title = f"{email} --> {issue_preview}"
         
-        # Task үүсгэх
+        # Task үүсгэх (bulgantamir автоматаар нэмэгдэнэ)
         result = planner.create_task(
             plan_id=PLANNER_PLAN_ID,
             bucket_id=PLANNER_BUCKET_ID,
@@ -161,7 +171,7 @@ def create_planner_task(email: str, issue: str, conv_id: int = None) -> bool:
         
         if "error" not in result and result.get("id"):
             task_id = result.get("id")
-            logging.info(f"Microsoft Planner task амжилттай үүсгэлээ: {task_id} - {email}")
+            logging.info(f"Microsoft Planner task амжилттай үүсгэлээ: {task_id} - {email} (bulgantamir@fibo.cloud assigned)")
             return True
         else:
             logging.error(f"Planner task үүсгэх амжилтгүй: {result}")
@@ -598,22 +608,60 @@ def chatwoot_webhook():
     
     # Check if this is an email address
     if "@" in text and is_valid_email(text.strip()):
-        verification_code = send_verification_email(text.strip())
-        if verification_code:
-            if conv_id not in conversation_memory:
-                conversation_memory[conv_id] = []
-            conversation_memory[conv_id].append({
-                "role": "system", 
-                "content": f"verification_code:{verification_code},email:{text.strip()}"
-            })
-            
-            response = "📧 Таны имэйл хаяг руу баталгаажуулах код илгээлээ. Уг кодыг оруулна уу."
-            send_to_chatwoot(conv_id, response)
-            return jsonify({"status": "success"}), 200
+        # Store email for confirmation
+        if conv_id not in conversation_memory:
+            conversation_memory[conv_id] = []
+        conversation_memory[conv_id].append({
+            "role": "system", 
+            "content": f"pending_email:{text.strip()}"
+        })
+        
+        response = f"📧 Таны оруулсан имэйл хаяг: {text.strip()}\n\nТа дахин шалгана уу, зөв бол 'y' буруу бол 'n' гэж бичнэ үү."
+        send_to_chatwoot(conv_id, response)
+        return jsonify({"status": "success"}), 200
+    
+    # Check if user is confirming email with 'tiim' or 'ugui'
+    if text.lower() in ['tiim', 'тийм', 'yes', 'y']:
+        # Look for pending email
+        pending_email = None
+        for msg in history:
+            if msg.get("role") == "system" and "pending_email:" in msg.get("content", ""):
+                pending_email = msg.get("content").split(":")[1]
+                break
+        
+        if pending_email:
+            verification_code = send_verification_email(pending_email)
+            if verification_code:
+                # Remove pending email and add verification code
+                conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] 
+                                               if not (msg.get("role") == "system" and "pending_email:" in msg.get("content", ""))]
+                conversation_memory[conv_id].append({
+                    "role": "system", 
+                    "content": f"verification_code:{verification_code},email:{pending_email}"
+                })
+                
+                response = "📧 Таны имэйл хаяг руу баталгаажуулах 6 оронтой код илгээлээ. Уг кодыг оруулна уу."
+                send_to_chatwoot(conv_id, response)
+                return jsonify({"status": "success"}), 200
+            else:
+                response = "❌ Имэйл илгээхэд алдаа гарлаа. Дахин оролдоно уу эсвэл өөр имэйл хаяг оруулна уу."
+                send_to_chatwoot(conv_id, response)
+                return jsonify({"status": "success"}), 200
         else:
-            response = "❌ Имэйл илгээхэд алдаа гарлаа. Дахин оролдоно уу эсвэл өөр имэйл хаяг оруулна уу."
+            response = "⚠️ Баталгаажуулах имэйл хаяг олдсонгүй. Эхлээд имэйл хаягаа оруулна уу."
             send_to_chatwoot(conv_id, response)
             return jsonify({"status": "success"}), 200
+    
+    # Check if user is rejecting email with 'ugui'
+    if text.lower() in ['ugui', 'үгүй', 'no', 'n']:
+        # Remove pending email
+        if conv_id in conversation_memory:
+            conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] 
+                                           if not (msg.get("role") == "system" and "pending_email:" in msg.get("content", ""))]
+        
+        response = "❌ Имэйл хаяг буруу байлаа. Зөв имэйл хаягаа дахин оруулна уу."
+        send_to_chatwoot(conv_id, response)
+        return jsonify({"status": "success"}), 200
     
     # Check if this is a verification code (6 digits)
     if len(text) == 6 and text.isdigit():
@@ -684,15 +732,15 @@ def chatwoot_webhook():
             # Send confirmation email to user
             confirmation_sent = send_confirmation_email(verified_email, text[:100] + "..." if len(text) > 100 else text)
             
-            status_msg = ""
-            if teams_success and planner_success:
-                status_msg = "✅ Таны асуудлыг Teams болон Planner-д амжилттай илгээлээ."
-            elif teams_success:
-                status_msg = "✅ Таны асуудлыг Teams-д амжилттай илгээлээ."
-            elif planner_success:
-                status_msg = "✅ Таны асуудлыг Planner-д амжилттай илгээлээ."
-            else:
-                status_msg = "⚠️ Таны асуудлыг хүлээн авлаа."
+            # status_msg = ""
+            # if teams_success and planner_success:
+            #     status_msg = "✅ Таны асуудлыг Teams болон Planner-д амжилттай илгээлээ."
+            # elif teams_success:
+            #     status_msg = "✅ Таны асуудлыг Teams-д амжилттай илгээлээ."
+            # elif planner_success:
+            #     status_msg = "✅ Таны асуудлыг Planner-д амжилттай илгээлээ."
+            # else:
+            #     status_msg = "⚠️ Таны асуудлыг хүлээн авлаа."
                 
             response = f"{status_msg} Бид тантай удахгүй холбогдох болно. Баярлалаа!"
             
@@ -989,7 +1037,7 @@ def send_verification_email(email: str) -> str:
 Хэрэв та энэ хүсэлтийг илгээгээгүй бол мэдэгдэнэ үү.
 
 Хүндэтгэсэн,
-Cloud.mn Баг"""
+Cloud.mn тусламжийн үйлчилгээ"""
     
     msg.attach(MIMEText(body, 'plain'))
     
@@ -1019,12 +1067,12 @@ def send_confirmation_email(email: str, problem: str) -> bool:
     
     body = f"""Сайн байна уу,
 
-Таны "{problem}" асуудлыг дэмжлэгийн багт амжилттай илгээлээ.
+Таны "{problem}" асуудлыг тусламжийн баг руу амжилттай илгээлээ.
 
-Бид таны хүсэлтийг хүлээн авч, удахгүй танд хариу өгөх болно. Та нэмэлт мэдээлэл шаардлагатай бол манай багтай холбогдоно уу.
+Бид таны хүсэлтийг хүлээн авч, удахгүй танд хариу өгөх болно.
 
 Хүндэтгэсэн,
-Cloud.mn Дэмжлэгийн Баг"""
+Cloud.mn тусламжийн үйлчилгээ"""
     
     msg.attach(MIMEText(body, 'plain'))
     
