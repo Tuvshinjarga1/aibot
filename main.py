@@ -732,15 +732,9 @@ def chatwoot_webhook():
             # Send confirmation email to user
             confirmation_sent = send_confirmation_email(verified_email, text[:100] + "..." if len(text) > 100 else text)
             
-            # status_msg = ""
-            # if teams_success and planner_success:
-            #     status_msg = "✅ Таны асуудлыг Teams болон Planner-д амжилттай илгээлээ."
-            # elif teams_success:
-            #     status_msg = "✅ Таны асуудлыг Teams-д амжилттай илгээлээ."
-            # elif planner_success:
-            #     status_msg = "✅ Таны асуудлыг Planner-д амжилттай илгээлээ."
-            # else:
-            #     status_msg = "⚠️ Таны асуудлыг хүлээн авлаа."
+            status_msg = ""
+            if teams_success and planner_success:
+                status_msg = "✅ Таны асуудлыг хүлээн авлаа."
                 
             response = f"{status_msg} Бид тантай удахгүй холбогдох болно. Баярлалаа!"
             
