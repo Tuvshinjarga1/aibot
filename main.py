@@ -302,7 +302,7 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     
     # Build context from crawled data if available
     context = ""
-    if context_data and crawled_data:
+    if crawled_data:
         # Search for relevant content
         search_results = search_in_crawled_data(user_message, max_results=3)
         if search_results:
