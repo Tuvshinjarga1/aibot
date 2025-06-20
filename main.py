@@ -769,21 +769,21 @@ def should_escalate_to_human(user_message: str, search_results: list, ai_respons
     
     # Use AI to evaluate its own response quality
     if not client:
-        # Fallback without AI evaluation
-        return not search_results or (search_results and search_results[0].get('relevance_score', 0) < 2)
+        # Fallback without AI evaluation - be more lenient
+        return len(user_message) > 50 and (not search_results or len(search_results) == 0)
     
     # Build context for AI self-evaluation
     context = f"""Хэрэглэгчийн асуулт: "{user_message}"
 
 Манай баримт бичгээс хайсан үр дүн:
-{f"Олдсон: {len(search_results)} үр дүн, хамгийн сайн оноо: {search_results[0].get('relevance_score', 0)}" if search_results else "Мэдээлэл олдсонгүй"}
+{f"Олдсон: {len(search_results)} үр дүн" if search_results else "Мэдээлэл олдсонгүй"}
 
 Миний өгсөн хариулт: "{ai_response}"
 
 Ярилцлагын сүүлийн мессежүүд:"""
     
     if history:
-        recent_messages = [msg.get("content", "")[:100] for msg in history[-2:] if msg.get("role") == "user"]
+        recent_messages = [msg.get("content", "")[:100] for msg in history[-3:] if msg.get("role") == "user"]
         if recent_messages:
             context += "\n" + "\n".join(recent_messages)
     
@@ -795,18 +795,23 @@ def should_escalate_to_human(user_message: str, search_results: list, ai_respons
                     "role": "system",
                     "content": """Та өөрийн өгсөн хариултыг үнэлж, хэрэглэгчид хангалттай эсэхийг шийднэ.
 
-Дараах тохиолдлуудад хүний бас ажилтны тусламж шаардлагатай:
-- Хэрэглэгчийн асуултад тодорхой хариулт өгч чадаагүй
-- Баримт бичгээс хангалттай мэдээлэл олдоогүй  
-- Техникийн алдаа, тохиргоо, акаунтын асуудал
-- Cloud.mn-ээс өөр үйлчилгээ хүсэж байгаа (хостинг, домэйн гэх мэт)
-- Тусгай хүсэлт, гомдол, санал
-- Хариулт ерөнхий, тодорхойгүй байгаа
+Дараах тохиолдлуудад л хүний ажилтны тусламж шаардлагатай:
+- Хэрэглэгч техникийн алдаа, тохиргооны асуудлаар тусламж хүсэж байгаа
+- Акаунт, төлбөр, хостинг, домэйн зэрэг Cloud.mn-ийн үйлчилгээтэй холбоотой асуудал
+- Тусгай хүсэлт, гомдол, шуурхай тусламж хэрэгтэй асуудал
+- Хэрэглэгч өөрөө "ажилтныг хүсэж байна" гэж тодорхой хэлсэн тохиолдол
+- Миний хариулт нь хэрэглэгчийн асуултын үндсэн сэдвээс огт холдсон бол
 
-Хэрэв хэрэглэгчийн асуултад хангалттай, тодорхой хариулт өгсөн бол 'NO'.
-Хэрэв хариулт хангалтгүй эсвэл хүний бас ажилтны тусламж хэрэгтэй бол 'YES'.
+Дараах тохиолдлуудад хүний тусламж ШААРДЛАГАГҮЙ:
+- Энгийн мэдээлэл асуух (Cloud.mn docs-ийн тухай)
+- Ерөнхий зөвлөгөө авах
+- Техникийн мэдлэг судлах
+- Би хангалттай хариулт өгч чадсан тохиолдол
+- Хэрэглэгч зүгээр л мэдээлэл хайж байгаа
 
-Хариултаа зөвхөн 'YES' эсвэл 'NO' гэж өгнө үү."""
+Өөрийнхөө хариултанд итгэлтэй байж, хэрэглэгч дахин асууж болно гэдгийг санаарай.
+
+Хариултаа зөвхөн 'YES' (хүний тусламж хэрэгтэй) эсвэл 'NO' (миний хариулт хангалттай) гэж өгнө үү."""
                 },
                 {
                     "role": "user", 
@@ -814,17 +819,17 @@ def should_escalate_to_human(user_message: str, search_results: list, ai_respons
                 }
             ],
             max_tokens=10,
-            temperature=0.1
+            temperature=0.2
         )
         
         ai_decision = response.choices[0].message.content.strip().upper()
-        logging.info(f"AI self-evaluation for conv {user_message[:50]}...: {ai_decision}")
+        logging.info(f"AI self-evaluation for '{user_message[:30]}...': {ai_decision}")
         return ai_decision == "YES"
         
     except Exception as e:
         logging.error(f"AI self-evaluation error: {e}")
-        # Fallback: escalate if no good search results
-        return not search_results or (search_results and search_results[0].get('relevance_score', 0) < 2)
+        # More lenient fallback - don't escalate by default
+        return False
 
 
 # —— Additional API Endpoints —— #
