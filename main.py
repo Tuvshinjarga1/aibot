@@ -635,8 +635,13 @@ def chatwoot_webhook():
             stored_code = parts[0].split(":")[1]
             email = parts[1].split(":")[1]
             
+            # Count failed attempts
+            failed_attempts = sum(1 for msg in history 
+                                if msg.get("role") == "assistant" 
+                                and "❌ Баталгаажуулах код буруу байна" in msg.get("content", ""))
+            
             if text == stored_code:
-                response = "✅ Баталгаажуулалт амжилттай. Одоо асуудлаа дэлгэрэнгүй бичнэ үү."
+                response = "✅ Баталгаажуулалт амжилттай! Одоо асуудлаа дэлгэрэнгүй бичнэ үү."
                 send_to_chatwoot(conv_id, response)
                 
                 conversation_memory[conv_id].append({
@@ -645,9 +650,31 @@ def chatwoot_webhook():
                 })
                 return jsonify({"status": "success"}), 200
             else:
-                response = "❌ Баталгаажуулах код буруу байна. Дахин оролдоно уу."
-                send_to_chatwoot(conv_id, response)
-                return jsonify({"status": "success"}), 200
+                # Handle failed verification attempts
+                if failed_attempts >= 2:  # Allow 3 total attempts (0, 1, 2)
+                    response = """❌ Баталгаажуулах кодыг 3 удаа буруу оруулсан тул шинэ код авах шаардлагатай. 
+                    
+Шинэ код авахын тулд имэйл хаягаа дахин оруулна уу."""
+                    send_to_chatwoot(conv_id, response)
+                    
+                    # Remove old verification code from memory
+                    conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] 
+                                                   if not (msg.get("role") == "system" and "verification_code:" in msg.get("content", ""))]
+                    return jsonify({"status": "success"}), 200
+                else:
+                    remaining_attempts = 2 - failed_attempts
+                    response = f"""❌ Баталгаажуулах код буруу байна. 
+                    
+Танд {remaining_attempts} удаа оролдох боломж үлдлээ. Имэйлээ шалгаж, зөв кодыг оруулна уу."""
+                    send_to_chatwoot(conv_id, response)
+                    return jsonify({"status": "success"}), 200
+        else:
+            # No verification code found in memory
+            response = """⚠️ Баталгаажуулах код олдсонгүй. 
+            
+Эхлээд имэйл хаягаа оруулж, баталгаажуулах код авна уу."""
+            send_to_chatwoot(conv_id, response)
+            return jsonify({"status": "success"}), 200
     
     # Check if user has verified email and is describing an issue
     verified_email = None
