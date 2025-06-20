@@ -433,13 +433,13 @@ def search_in_crawled_data(query: str, max_results: int = 3):
             
     return results
 
-def scrape_single(url: str):
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    title = soup.title.string.strip() if soup.title else url
-    body, images = extract_content(soup, url)
-    return {"url": url, "title": title, "body": body, "images": images}
+# def scrape_single(url: str):
+#     resp = requests.get(url, timeout=10)
+#     resp.raise_for_status()
+#     soup = BeautifulSoup(resp.text, "html.parser")
+#     title = soup.title.string.strip() if soup.title else url
+#     body, images = extract_content(soup, url)
+#     return {"url": url, "title": title, "body": body, "images": images}
 
 
 # —— Enhanced Chatwoot Integration —— #
