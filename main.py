@@ -389,66 +389,47 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
         return f"🔧 AI-тай холбогдоход саад гарлаа. Дараах зүйлсийг туршиж үзнэ үү:\n• Асуултаа дахин илгээнэ үү\n• Асуултаа тодорхой болгоно уу\n• Холбогдох мэдээллийг хайж үзнэ үү\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
 
 def search_in_crawled_data(query: str, max_results: int = 3):
-    """Enhanced search through crawled data with better relevance scoring"""
+    """Simple search through crawled data"""
     if not crawled_data:
         return []
     
     query_lower = query.lower()
     results = []
-    scored_pages = []
     
     for page in crawled_data:
-        score = 0
         title = page['title'].lower()
         body = page['body'].lower()
         
-        # Title matches are more important
-        if query_lower in title:
-            score += 3
-        elif any(word in title for word in query_lower.split()):
-            score += 2
+        # Check if query matches in title or body
+        if (query_lower in title or 
+            query_lower in body or 
+            any(word in title or word in body for word in query_lower.split())):
             
-        # Body matches
-        if query_lower in body:
-            score += 2
-        elif any(word in body for word in query_lower.split()):
-            score += 1
+            # Find the most relevant snippet
+            query_words = query_lower.split()
+            best_snippet = ""
+            max_context = 300
             
-        # Exact phrase matches are very important
-        if f'"{query_lower}"' in body:
-            score += 4
+            for word in query_words:
+                if word in body.lower():
+                    start = max(0, body.lower().find(word) - 100)
+                    end = min(len(body), body.lower().find(word) + 200)
+                    snippet = body[start:end]
+                    if len(snippet) > len(best_snippet):
+                        best_snippet = snippet
             
-        if score > 0:
-            scored_pages.append((score, page))
-    
-    # Sort by score and get top results
-    scored_pages.sort(key=lambda x: x[0], reverse=True)  # Sort by score (first element of tuple)
-    for score, page in scored_pages[:max_results]:
-        # Find the most relevant snippet
-        body = page['body']
-        query_words = query_lower.split()
-        
-        # Try to find a good context around the query
-        best_snippet = ""
-        max_context = 300
-        
-        for word in query_words:
-            if word in body.lower():
-                start = max(0, body.lower().find(word) - 100)
-                end = min(len(body), body.lower().find(word) + 200)
-                snippet = body[start:end]
-                if len(snippet) > len(best_snippet):
-                    best_snippet = snippet
-        
-        if not best_snippet:
-            best_snippet = body[:max_context] + "..." if len(body) > max_context else body
+            if not best_snippet:
+                best_snippet = body[:max_context] + "..." if len(body) > max_context else body
+                
+            results.append({
+                'title': page['title'],
+                'url': page['url'],
+                'snippet': best_snippet
+            })
             
-        results.append({
-            'title': page['title'],
-            'url': page['url'],
-            'snippet': best_snippet,
-            'relevance_score': score
-        })
+            # Stop when we have enough results
+            if len(results) >= max_results:
+                break
             
     return results
 
