@@ -740,6 +740,11 @@ def chatwoot_webhook():
             
             if confirmation_sent:
                 response += "\n📧 Танд баталгаажуулах мэйл илгээлээ."
+            
+            # Reset session after successful issue forwarding
+            conversation_memory[conv_id] = []
+            logging.info(f"Session reset for conversation {conv_id} after successful issue forwarding")
+            
             send_to_chatwoot(conv_id, response)
             return jsonify({"status": "success"}), 200
     
