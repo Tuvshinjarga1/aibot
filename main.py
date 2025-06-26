@@ -594,7 +594,7 @@ def api_crawl():
 # —— Enhanced Chatwoot Webhook —— #
 @app.route("/webhook/chatwoot", methods=["POST"])
 def chatwoot_webhook():
-    """Enhanced webhook with AI integration"""
+    """Enhanced webhook with AI integration and assignment checking"""
     global crawled_data, crawl_status
     
     data = request.json or {}
@@ -609,6 +609,14 @@ def chatwoot_webhook():
     contact_name = contact.get("name", "Хэрэглэгч")
     
     logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
+    
+    # Check if conversation is assigned to an agent
+    conv_info = get_conversation_info(conv_id)
+    if conv_info and conv_info.get("assignee"):
+        logging.info(f"Conversation {conv_id} is assigned to agent {conv_info['assignee']['name']}, bot will not respond")
+        return jsonify({"status": "assigned_to_agent"}), 200
+    
+    logging.info(f"Conversation {conv_id} is not assigned, bot will respond")
     
     # Get conversation history
     history = conversation_memory.get(conv_id, [])
