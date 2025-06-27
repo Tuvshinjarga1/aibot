@@ -612,6 +612,7 @@ def chatwoot_webhook():
     
     # Check if conversation is assigned to an agent via API call
     conv_info = get_conversation_info(conv_id)
+    logging.info(f"Conversation info: {conv_info}")
     if conv_info:
         assignee_id = conv_info.get("assignee_id")
         if assignee_id is not None:
