@@ -611,9 +611,7 @@ def chatwoot_webhook():
     logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
     
     # Check if conversation is assigned to an agent via assignee_id
-    meta_data = data.get("meta", {})
-    assignee = meta_data.get("assignee")
-    assignee_id = assignee.get("id") if assignee else None
+    assignee_id = data["meta"]["assignee"]["id"]
     
     if assignee_id is not None:
         assignee_name = assignee.get("name", "Unknown")
