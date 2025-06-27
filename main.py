@@ -610,13 +610,15 @@ def chatwoot_webhook():
     
     logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
     
-    # Check if conversation is assigned to an agent
-    conv_info = get_conversation_info(conv_id)
-    if conv_info and conv_info.get("assignee"):
-        logging.info(f"Conversation {conv_id} is assigned to agent {conv_info['assignee']['name']}, bot will not respond")
+    # Check if conversation is assigned to an agent via assignee_id
+    conversation_data = data.get("conversation", {})
+    assignee_id = conversation_data.get("assignee_id")
+    
+    if assignee_id is not None:
+        logging.info(f"Conversation {conv_id} is assigned to agent (assignee_id: {assignee_id}), bot will not respond")
         return jsonify({"status": "assigned_to_agent"}), 200
     
-    logging.info(f"Conversation {conv_id} is not assigned, bot will respond")
+    logging.info(f"Conversation {conv_id} is not assigned (assignee_id: null), bot will respond")
     
     # Get conversation history
     history = conversation_memory.get(conv_id, [])
