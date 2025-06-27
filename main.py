@@ -1,4 +1,4 @@
-import os
+import osMore actions
 import time
 import logging
 import requests
@@ -85,10 +85,10 @@ def get_planner_access_token() -> str:
         token_data = response.json()
         _cached_token = token_data["access_token"]
         _token_expiry = time.time() + token_data.get("expires_in", 3600)
-        
+
         logging.info("Planner access token амжилттай авлаа")
         return _cached_token
-        
+
     except Exception as e:
         logging.error(f"Planner access token авахад алдаа гарлаа: {e}")
         return None
@@ -115,7 +115,7 @@ class MicrosoftPlannerAPI:
 
         if due_date:
             data["dueDateTime"] = due_date
-    
+
         # Bulgantamir-ийг үргэлж нэмэх
         bulgantamir_user_id = "c64d22c4-5210-4132-8ad3-776ce1996b6c"
         assignments = {
@@ -124,14 +124,14 @@ class MicrosoftPlannerAPI:
                 "orderHint": " !"
             }
         }
-        
+
         # Хэрэв нэмэлт хүн байвал тэрийг бас нэмэх
         if assigned_user_id and assigned_user_id != bulgantamir_user_id:
             assignments[assigned_user_id] = {
                 "@odata.type": "#microsoft.graph.plannerAssignment",
                 "orderHint": " !"
             }
-        
+
         data["assignments"] = assignments
 
         try:
@@ -146,21 +146,21 @@ def create_planner_task(email: str, issue: str, conv_id: int = None) -> bool:
     if not all([PLANNER_TENANT_ID, PLANNER_CLIENT_ID, PLANNER_CLIENT_SECRET, PLANNER_PLAN_ID, PLANNER_BUCKET_ID]):
         logging.error("Microsoft Planner тохиргоо дутуу байна")
         return False
-        
+
     try:
         # Access token авах
         token = get_planner_access_token()
         if not token:
             logging.error("Planner access token авч чадсангүй")
             return False
-            
+
         # Planner API instance үүсгэх
         planner = MicrosoftPlannerAPI(token)
-        
+
         # Task title үүсгэх (buten.py форматтайгаар)
         issue_preview = issue[:50] + "..." if len(issue) > 50 else issue
         title = f"{email} --> {issue_preview}"
-        
+
         # Task үүсгэх (bulgantamir автоматаар нэмэгдэнэ)
         result = planner.create_task(
             plan_id=PLANNER_PLAN_ID,
@@ -168,7 +168,7 @@ def create_planner_task(email: str, issue: str, conv_id: int = None) -> bool:
             title=title,
             priority=1  # Өндөр ач холбогдол
         )
-        
+
         if "error" not in result and result.get("id"):
             task_id = result.get("id")
             logging.info(f"Microsoft Planner task амжилттай үүсгэлээ: {task_id} - {email} (bulgantamir@fibo.cloud assigned)")
@@ -176,7 +176,7 @@ def create_planner_task(email: str, issue: str, conv_id: int = None) -> bool:
         else:
             logging.error(f"Planner task үүсгэх амжилтгүй: {result}")
             return False
-            
+
     except Exception as e:
         logging.error(f"Planner task үүсгэхэд алдаа гарлаа: {e}")
         return False
@@ -227,18 +227,18 @@ def crawl_and_scrape(start_url: str):
 def auto_crawl_on_startup():
     """Automatically crawl the site on startup"""
     global crawled_data, crawl_status
-    
+
     if not AUTO_CRAWL_ON_START:
         crawl_status = {"status": "disabled", "message": "Auto-crawl is disabled"}
         logging.info("Auto-crawl is disabled")
         return
-    
+
     try:
         logging.info(f"🚀 Starting automatic crawl of {ROOT_URL}")
         crawl_status = {"status": "running", "message": f"Crawling {ROOT_URL}..."}
-        
+
         crawled_data = crawl_and_scrape(ROOT_URL)
-        
+
         if crawled_data:
             crawl_status = {
                 "status": "completed", 
@@ -250,7 +250,7 @@ def auto_crawl_on_startup():
         else:
             crawl_status = {"status": "failed", "message": "No pages were crawled"}
             logging.warning("❌ Auto-crawl failed: No pages found")
-            
+
     except Exception as e:
         crawl_status = {"status": "error", "message": f"Crawl error: {str(e)}"}
         logging.error(f"❌ Auto-crawl error: {e}")
@@ -303,13 +303,13 @@ def scrape_single(url: str):
 # —— AI Assistant Functions —— #
 def get_ai_response(user_message: str, conversation_id: int, context_data: list = None):
     """Enhanced AI response with better context awareness"""
-    
+
     if not client:
         return "🔑 OpenAI API түлхүүр тохируулагдаагүй байна. Админтай холбогдоно уу."
-    
+
     # Get conversation history
     history = conversation_memory.get(conversation_id, [])
-    
+
     # Build context from crawled data if available
     context = ""
     if crawled_data:
@@ -324,7 +324,7 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
                     f"Холбогдох агуулга: {result['snippet']}\n"
                 )
             context = "\n\n".join(relevant_pages)
-    
+
     # Build system message with context
     system_content = """Та Cloud.mn-ийн баримт бичгийн талаар асуултад хариулдаг Монгол AI туслах юм. 
     Хэрэглэгчтэй монгол хэлээр ярилцаарай. Хариултаа товч бөгөөд ойлгомжтой байлгаарай.
@@ -359,10 +359,10 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     - Хэрэглэгч тодорхой хуудсыг шүүрдэхийг хүсвэл, тухайн хуудсыг шүүрдэж хариулна
     - Хэрэглэгч тусламж хүсвэл, боломжтой үйлдлүүдийн талаар тайлбарлана
     - Хэрэглэгч бүх сайтыг шүүрдэхийг хүсвэл, шүүрдэлтийг эхлүүлнэ"""
-    
+
     if context:
         system_content += f"\n\nКонтекст мэдээлэл:\n{context}"
-    
+
     # Build conversation context
     messages = [
         {
@@ -370,14 +370,14 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
             "content": system_content
         }
     ]
-    
+
     # Add conversation history
     for msg in history[-4:]:  # Last 4 messages
         messages.append(msg)
-    
+
     # Add current message
     messages.append({"role": "user", "content": user_message})
-    
+
     try:
         response = client.chat.completions.create(
             model="gpt-4",
@@ -385,22 +385,22 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
             max_tokens=500,  # Increased token limit for better responses
             temperature=0.7
         )
-        
+
         ai_response = response.choices[0].message.content
-        
+
         # Store in memory
         if conversation_id not in conversation_memory:
             conversation_memory[conversation_id] = []
-        
+
         conversation_memory[conversation_id].append({"role": "user", "content": user_message})
         conversation_memory[conversation_id].append({"role": "assistant", "content": ai_response})
-        
+
         # Keep only last 8 messages
         if len(conversation_memory[conversation_id]) > 8:
             conversation_memory[conversation_id] = conversation_memory[conversation_id][-8:]
-            
+
         return ai_response
-        
+
     except Exception as e:
         logging.error(f"OpenAI API алдаа: {e}")
         return f"🔧 AI-тай холбогдоход саад гарлаа. Дараах зүйлсийг туршиж үзнэ үү:\n• Асуултаа дахин илгээнэ үү\n• Асуултаа тодорхой болгоно уу\n• Холбогдох мэдээллийг хайж үзнэ үү\n\nАлдааны дэлгэрэнгүй: {str(e)[:100]}"
@@ -409,24 +409,24 @@ def search_in_crawled_data(query: str, max_results: int = 3):
     """Simple search through crawled data"""
     if not crawled_data:
         return []
-    
+
     query_lower = query.lower()
     results = []
-    
+
     for page in crawled_data:
         title = page['title'].lower()
         body = page['body'].lower()
-        
+
         # Check if query matches in title or body
         if (query_lower in title or 
             query_lower in body or 
             any(word in title or word in body for word in query_lower.split())):
-            
+
             # Find the most relevant snippet
             query_words = query_lower.split()
             best_snippet = ""
             max_context = 300
-            
+
             for word in query_words:
                 if word in body.lower():
                     start = max(0, body.lower().find(word) - 100)
@@ -434,20 +434,20 @@ def search_in_crawled_data(query: str, max_results: int = 3):
                     snippet = body[start:end]
                     if len(snippet) > len(best_snippet):
                         best_snippet = snippet
-            
+
             if not best_snippet:
                 best_snippet = body[:max_context] + "..." if len(body) > max_context else body
-                
+
             results.append({
                 'title': page['title'],
                 'url': page['url'],
                 'snippet': best_snippet
             })
-            
+
             # Stop when we have enough results
             if len(results) >= max_results:
                 break
-            
+
     return results
 
 # def scrape_single(url: str):
@@ -475,7 +475,7 @@ def send_to_chatwoot(conv_id: int, content: str, message_type: str = "outgoing")
         "message_type": message_type,
         "private": False
     }
-    
+
     try:
         resp = requests.post(api_url, json=payload, headers=headers, timeout=10)
         resp.raise_for_status()
@@ -489,7 +489,7 @@ def get_conversation_info(conv_id: int):
     """Get conversation details from Chatwoot"""
     api_url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}"
     headers = {"api_access_token": CHATWOOT_API_KEY}
-    
+
     try:
         resp = requests.get(api_url, headers=headers, timeout=10)
         resp.raise_for_status()
@@ -503,7 +503,7 @@ def mark_conversation_resolved(conv_id: int):
     api_url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{ACCOUNT_ID}/conversations/{conv_id}/toggle_status"
     headers = {"api_access_token": CHATWOOT_API_KEY}
     payload = {"status": "resolved"}
-    
+
     try:
         resp = requests.post(api_url, json=payload, headers=headers, timeout=10)
         resp.raise_for_status()
@@ -519,10 +519,10 @@ def send_to_teams(email: str, issue: str, conv_id: int = None) -> bool:
     if not TEAMS_WEBHOOK_URL:
         logging.error("Teams webhook URL not configured")
         return False
-    
+
     # Build Chatwoot conversation link
     chatwoot_link = f"{CHATWOOT_BASE_URL}/app/accounts/{ACCOUNT_ID}/conversations/{conv_id}" if conv_id else "Линк байхгүй"
-        
+
     payload = {
         "@type": "MessageCard",
         "@context": "http://schema.org/extensions",
@@ -556,7 +556,7 @@ def send_to_teams(email: str, issue: str, conv_id: int = None) -> bool:
             }]
         }]
     }
-    
+
     try:
         response = requests.post(
             TEAMS_WEBHOOK_URL,
@@ -596,9 +596,9 @@ def api_crawl():
 def chatwoot_webhook():
     """Enhanced webhook with AI integration and assignment checking"""
     global crawled_data, crawl_status
-    
+
     data = request.json or {}
-    
+
     # Only process incoming messages
     if data.get("message_type") != "incoming":
         return jsonify({}), 200
@@ -607,39 +607,40 @@ def chatwoot_webhook():
     text = data.get("content", "").strip()
     contact = data.get("conversation", {}).get("contact", {})
     contact_name = contact.get("name", "Хэрэглэгч")
-    
+
     logging.info(f"Received message from {contact_name} in conversation {conv_id}: {text}")
-    
+
     # Check if conversation is assigned to an agent via API call
     conv_info = get_conversation_info(conv_id)
+    logging.info(f"Conversation info: {conv_info}")
     # logging.info(f"Conversation info: {conv_info}")
     if conv_info:
         # Check for assignee in meta first
         assignee_id = None
         assignee_name = "Unknown"
-        
+
         # Try to get assignee from meta.assignee
         meta = conv_info.get("meta", {})
         assignee = meta.get("assignee")
         if assignee:
             assignee_id = assignee.get("id")
             assignee_name = assignee.get("name", "Unknown")
-        
+
         # If not found in meta, try direct assignee_id field
         if assignee_id is None:
             assignee_id = conv_info.get("assignee_id")
             if assignee_id and conv_info.get("assignee"):
                 assignee_name = conv_info["assignee"].get("name", "Unknown")
-        
+
         if assignee_id is not None:
             logging.info(f"Conversation {conv_id} is assigned to agent {assignee_name} (assignee_id: {assignee_id}), bot will not respond")
             return jsonify({"status": "assigned_to_agent"}), 200
-    
+
     logging.info(f"Conversation {conv_id} is not assigned (assignee_id: null), bot will respond")
-    
+
     # Get conversation history
     history = conversation_memory.get(conv_id, [])
-    
+
     # Check if this is an email address
     if "@" in text and is_valid_email(text.strip()):
         # Store email for confirmation
@@ -649,11 +650,11 @@ def chatwoot_webhook():
             "role": "system", 
             "content": f"pending_email:{text.strip()}"
         })
-        
+
         response = f"📧 Таны оруулсан имэйл хаяг: {text.strip()}\n\nТа дахин шалгана уу, зөв бол 'y' буруу бол 'n' гэж бичнэ үү."
         send_to_chatwoot(conv_id, response)
         return jsonify({"status": "success"}), 200
-    
+
     # Check if user is confirming email with 'tiim' or 'ugui'
     if text.lower() in ['tiim', 'тийм', 'yes', 'y']:
         # Look for pending email
@@ -662,7 +663,7 @@ def chatwoot_webhook():
             if msg.get("role") == "system" and "pending_email:" in msg.get("content", ""):
                 pending_email = msg.get("content").split(":")[1]
                 break
-        
+
         if pending_email:
             verification_code = send_verification_email(pending_email)
             if verification_code:
@@ -673,7 +674,7 @@ def chatwoot_webhook():
                     "role": "system", 
                     "content": f"verification_code:{verification_code},email:{pending_email}"
                 })
-                
+
                 response = "📧 Таны имэйл хаяг руу баталгаажуулах 6 оронтой код илгээлээ. Уг кодыг оруулна уу."
                 send_to_chatwoot(conv_id, response)
                 return jsonify({"status": "success"}), 200
@@ -685,18 +686,18 @@ def chatwoot_webhook():
             response = "⚠️ Баталгаажуулах имэйл хаяг олдсонгүй. Эхлээд имэйл хаягаа оруулна уу."
             send_to_chatwoot(conv_id, response)
             return jsonify({"status": "success"}), 200
-    
+
     # Check if user is rejecting email with 'ugui'
     if text.lower() in ['ugui', 'үгүй', 'no', 'n']:
         # Remove pending email
         if conv_id in conversation_memory:
             conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] 
                                            if not (msg.get("role") == "system" and "pending_email:" in msg.get("content", ""))]
-        
+
         response = "❌ Имэйл хаяг буруу байлаа. Зөв имэйл хаягаа дахин оруулна уу."
         send_to_chatwoot(conv_id, response)
         return jsonify({"status": "success"}), 200
-    
+
     # Check if this is a verification code (6 digits)
     if len(text) == 6 and text.isdigit():
         verification_info = None
@@ -704,21 +705,21 @@ def chatwoot_webhook():
             if msg.get("role") == "system" and "verification_code:" in msg.get("content", ""):
                 verification_info = msg.get("content")
                 break
-        
+
         if verification_info:
             parts = verification_info.split(",")
             stored_code = parts[0].split(":")[1]
             email = parts[1].split(":")[1]
-            
+
             # Count failed attempts
             failed_attempts = sum(1 for msg in history 
                                 if msg.get("role") == "assistant" 
                                 and "❌ Баталгаажуулах код буруу байна" in msg.get("content", ""))
-            
+
             if text == stored_code:
                 response = "✅ Баталгаажуулалт амжилттай! Одоо асуудлаа дэлгэрэнгүй бичнэ үү."
                 send_to_chatwoot(conv_id, response)
-                
+
                 conversation_memory[conv_id].append({
                     "role": "system", 
                     "content": f"verified_email:{email}"
@@ -731,7 +732,7 @@ def chatwoot_webhook():
                     
 Шинэ код авахын тулд имэйл хаягаа дахин оруулна уу."""
                     send_to_chatwoot(conv_id, response)
-                    
+
                     # Remove old verification code from memory
                     conversation_memory[conv_id] = [msg for msg in conversation_memory[conv_id] 
                                                    if not (msg.get("role") == "system" and "verification_code:" in msg.get("content", ""))]
@@ -750,60 +751,60 @@ def chatwoot_webhook():
 Эхлээд имэйл хаягаа оруулж, баталгаажуулах код авна уу."""
             send_to_chatwoot(conv_id, response)
             return jsonify({"status": "success"}), 200
-    
+
     # Check if user has verified email and is describing an issue
     verified_email = None
     for msg in history:
         if msg.get("role") == "system" and "verified_email:" in msg.get("content", ""):
             verified_email = msg.get("content").split(":")[1]
             break
-    
+
     if verified_email and len(text) > 15:  # User has verified email and writing detailed message
         teams_success = send_to_teams(verified_email, text, conv_id)
         planner_success = create_planner_task(verified_email, text, conv_id)
-        
+
         if teams_success or planner_success:
             # Send confirmation email to user
             confirmation_sent = send_confirmation_email(verified_email, text[:100] + "..." if len(text) > 100 else text)
-            
+
             status_msg = ""
             if teams_success and planner_success:
                 status_msg = "✅ Таны асуудлыг хүлээн авлаа."
-                
+
             response = f"{status_msg} Бид тантай удахгүй холбогдох болно. Баярлалаа!"
-            
+
             if confirmation_sent:
                 response += "\n📧 Танд баталгаажуулах мэйл илгээлээ."
-            
+
             # Reset session after successful issue forwarding
             conversation_memory[conv_id] = []
             logging.info(f"Session reset for conversation {conv_id} after successful issue forwarding")
-            
+
             send_to_chatwoot(conv_id, response)
             return jsonify({"status": "success"}), 200
-    
+
     # Try to answer with AI first
     ai_response = get_ai_response(text, conv_id, crawled_data)
-    
+
     # Check if AI couldn't find good answer by searching crawled data
     search_results = search_in_crawled_data(text, max_results=3)
-    
+
     # Check if this user was previously escalated but asking a new question
     was_previously_escalated = any(
         msg.get("role") == "system" and "escalated_to_human" in msg.get("content", "")
         for msg in history
     )
-    
+
     # Let AI evaluate its own response quality and decide if human help is needed
     needs_human_help = should_escalate_to_human(text, search_results, ai_response, history)
-    
+
     # If user was previously escalated but AI can answer this new question, respond with AI
     if was_previously_escalated and not needs_human_help:
         # AI can handle this new question even though user was escalated before
         response_with_note = f"{ai_response}\n\n💡 Хэрэв энэ хариулт хангалтгүй бол, имэйл хаягаа оруулж дэмжлэгийн багтай холбогдоно уу."
         send_to_chatwoot(conv_id, response_with_note)
         return jsonify({"status": "success"}), 200
-    
+
     if needs_human_help and not verified_email:
         # Mark this conversation as escalated
         if conv_id not in conversation_memory:
@@ -812,12 +813,12 @@ def chatwoot_webhook():
             "role": "system", 
             "content": "escalated_to_human"
         })
-        
+
         # AI thinks it can't handle this properly, escalate to human
         escalation_response = """🤝 Би таны асуултад хангалттай хариулт өгч чадахгүй байна. Дэмжлэгийн багийн тусламж авахыг санал болгож байна.
 
 Тусламж авахын тулд имэйл хаягаа оруулна уу. Бид таны имэйл хаягийг баталгаажуулсны дараа асуудлыг шийдвэрлэх болно."""
-        
+
         send_to_chatwoot(conv_id, escalation_response)
     else:
         # AI is confident in its response, send it
@@ -828,12 +829,12 @@ def chatwoot_webhook():
 
 def should_escalate_to_human(user_message: str, search_results: list, ai_response: str, history: list) -> bool:
     """AI evaluates its own response and decides if human help is needed"""
-    
+
     # Use AI to evaluate its own response quality
     if not client:
         # Fallback without AI evaluation - be more lenient
         return len(user_message) > 50 and (not search_results or len(search_results) == 0)
-    
+
     # Build context for AI self-evaluation
     context = f"""Хэрэглэгчийн асуулт: "{user_message}"
 
@@ -843,12 +844,12 @@ def should_escalate_to_human(user_message: str, search_results: list, ai_respons
 Миний өгсөн хариулт: "{ai_response}"
 
 Ярилцлагын сүүлийн мессежүүд:"""
-    
+
     if history:
         recent_messages = [msg.get("content", "")[:100] for msg in history[-3:] if msg.get("role") == "user"]
         if recent_messages:
             context += "\n" + "\n".join(recent_messages)
-    
+
     try:
         response = client.chat.completions.create(
             model="gpt-4",
@@ -883,11 +884,11 @@ def should_escalate_to_human(user_message: str, search_results: list, ai_respons
             max_tokens=10,
             temperature=0.2
         )
-        
+
         ai_decision = response.choices[0].message.content.strip().upper()
         logging.info(f"AI self-evaluation for '{user_message[:30]}...': {ai_decision}")
         return ai_decision == "YES"
-        
+
     except Exception as e:
         logging.error(f"AI self-evaluation error: {e}")
         # More lenient fallback - don't escalate by default
@@ -912,15 +913,15 @@ def get_crawl_status():
 def force_crawl():
     """Force start a new crawl"""
     global crawled_data, crawl_status
-    
+
     # Check if already running
     if crawl_status["status"] == "running":
         return jsonify({"error": "Crawl is already running"}), 409
-    
+
     try:
         crawl_status = {"status": "running", "message": "Force crawl started via API"}
         crawled_data = crawl_and_scrape(ROOT_URL)
-        
+
         if crawled_data:
             crawl_status = {
                 "status": "completed",
@@ -936,7 +937,7 @@ def force_crawl():
         else:
             crawl_status = {"status": "failed", "message": "Force crawl failed - no pages found"}
             return jsonify({"error": "No pages were crawled"}), 500
-            
+
     except Exception as e:
         crawl_status = {"status": "error", "message": f"Force crawl error: {str(e)}"}
         return jsonify({"error": f"Crawl failed: {e}"}), 500
@@ -947,16 +948,16 @@ def api_search():
     data = request.get_json(force=True)
     query = data.get("query", "").strip()
     max_results = data.get("max_results", 5)
-    
+
     if not query:
         return jsonify({"error": "Missing 'query' in request body"}), 400
-    
+
     if crawl_status["status"] == "running":
         return jsonify({"error": "Crawl is currently running, please wait"}), 409
-    
+
     if not crawled_data:
         return jsonify({"error": "No crawled data available. Run crawl first."}), 404
-    
+
     results = search_in_crawled_data(query, max_results)
     return jsonify({
         "query": query,
@@ -995,15 +996,15 @@ def api_create_planner_task():
     email = data.get("email", "").strip()
     issue = data.get("issue", "").strip()
     conv_id = data.get("conversation_id")
-    
+
     if not email or not issue:
         return jsonify({"error": "Имэйл болон асуудал заавал шаардлагатай"}), 400
-    
+
     if not is_valid_email(email):
         return jsonify({"error": "Имэйл хаягийн формат буруу байна"}), 400
-    
+
     success = create_planner_task(email, issue, conv_id)
-    
+
     if success:
         return jsonify({
             "status": "success",
@@ -1031,14 +1032,7 @@ def health_check():
             "auto_crawl_enabled": AUTO_CRAWL_ON_START,
             "openai_configured": client is not None,
             "chatwoot_configured": bool(CHATWOOT_API_KEY and ACCOUNT_ID),
-            "chatwoot_account_id": ACCOUNT_ID,
             "teams_configured": bool(TEAMS_WEBHOOK_URL),
-            "teams_webhook_url": TEAMS_WEBHOOK_URL,
-            "planner_tenant_id": PLANNER_TENANT_ID,
-            "planner_client_id": PLANNER_CLIENT_ID,
-            "planner_client_secret": PLANNER_CLIENT_SECRET,
-            "planner_plan_id": PLANNER_PLAN_ID,
-            "planner_bucket_id": PLANNER_BUCKET_ID,
             "planner_configured": bool(PLANNER_TENANT_ID and PLANNER_CLIENT_ID and PLANNER_CLIENT_SECRET and PLANNER_PLAN_ID and PLANNER_BUCKET_ID),
             "smtp_configured": bool(SMTP_SERVER and SMTP_USERNAME and SMTP_PASSWORD)
         }
@@ -1046,7 +1040,7 @@ def health_check():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)
 # —— Email Verification Functions —— #
 def is_valid_email(email: str) -> bool:
     """Check if email format is valid"""
@@ -1058,16 +1052,16 @@ def send_verification_email(email: str) -> str:
     if not SMTP_FROM_EMAIL or not SMTP_PASSWORD or not SMTP_SERVER:
         logging.error("SMTP credentials not configured")
         return None
-        
+
     # Generate verification code
     verification_code = ''.join([str(random.randint(0, 9)) for _ in range(6)])
-    
+
     # Create email
     msg = MIMEMultipart()
     msg['From'] = SMTP_FROM_EMAIL
     msg['To'] = email
     msg['Subject'] = "Cloud.mn баталгаажуулах код"
-    
+
     body = f"""Сайн байна уу,
 
 Таны Cloud.mn-д хандсан хүсэлтийг баталгаажуулахын тулд доорх кодыг оруулна уу:
@@ -1078,9 +1072,9 @@ def send_verification_email(email: str) -> str:
 
 Хүндэтгэсэн,
 Cloud.mn тусламжийн үйлчилгээ"""
-    
+
     msg.attach(MIMEText(body, 'plain'))
-    
+
     try:
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
@@ -1098,13 +1092,13 @@ def send_confirmation_email(email: str, problem: str) -> bool:
     if not SMTP_FROM_EMAIL or not SMTP_PASSWORD or not SMTP_SERVER:
         logging.error("SMTP credentials not configured")
         return False
-        
+
     # Create email
     msg = MIMEMultipart()
     msg['From'] = SMTP_FROM_EMAIL
     msg['To'] = email
     msg['Subject'] = "Cloud.mn - Таны хүсэлтийг хүлээн авлаа"
-    
+
     body = f"""Сайн байна уу,
 
 Таны "{problem}" асуудлыг тусламжийн баг руу амжилттай илгээлээ.
@@ -1113,9 +1107,9 @@ def send_confirmation_email(email: str, problem: str) -> bool:
 
 Хүндэтгэсэн,
 Cloud.mn тусламжийн үйлчилгээ"""
-    
+
     msg.attach(MIMEText(body, 'plain'))
-    
+
     try:
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
