@@ -13,7 +13,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import re
 import random
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Union
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -51,15 +51,15 @@ PLANNER_BUCKET_ID    = os.getenv("PLANNER_BUCKET_ID")
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # —— Memory Storage —— #
-conversation_memory = {}
-crawled_data = []
+conversation_memory: Dict = {}
+crawled_data: List = []
 crawl_status = {"status": "not_started", "message": "Crawling has not started yet"}
 
 # —— Microsoft Planner Integration —— #
-_cached_token = None
+_cached_token: Optional[str] = None
 _token_expiry = 0  # UNIX timestamp
 
-def get_planner_access_token() -> str:
+def get_planner_access_token() -> Optional[str]:
     """Microsoft Planner-ийн access token авах"""
     global _cached_token, _token_expiry
 
@@ -141,7 +141,7 @@ class MicrosoftPlannerAPI:
             logging.error(f"Planner task үүсгэхэд алдаа гарлаа: {e}")
             return {"error": str(e)}
 
-def create_planner_task(email: str, issue: str, conv_id: int = None) -> bool:
+def create_planner_task(email: str, issue: str, conv_id: Optional[int] = None) -> bool:
     """Microsoft Planner-д task үүсгэх"""
     if not all([PLANNER_TENANT_ID, PLANNER_CLIENT_ID, PLANNER_CLIENT_SECRET, PLANNER_PLAN_ID, PLANNER_BUCKET_ID]):
         logging.error("Microsoft Planner тохиргоо дутуу байна")
@@ -162,6 +162,10 @@ def create_planner_task(email: str, issue: str, conv_id: int = None) -> bool:
         title = f"{email} --> {issue_preview}"
         
         # Task үүсгэх (bulgantamir автоматаар нэмэгдэнэ)
+        if not PLANNER_PLAN_ID or not PLANNER_BUCKET_ID:
+            logging.error("Planner plan_id эсвэл bucket_id байхгүй")
+            return False
+            
         result = planner.create_task(
             plan_id=PLANNER_PLAN_ID,
             bucket_id=PLANNER_BUCKET_ID,
@@ -202,7 +206,8 @@ def crawl_and_scrape(start_url: str):
             continue
 
         soup = BeautifulSoup(resp.text, "html.parser")
-        title = soup.title.string.strip() if soup.title else url
+        title_tag = soup.title
+        title = title_tag.string.strip() if title_tag and title_tag.string else url
         body, images = extract_content(soup, url)
 
         results.append({
@@ -213,8 +218,8 @@ def crawl_and_scrape(start_url: str):
         })
 
         for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if is_internal_link(href):
+            href = a.get("href")  # type: ignore
+            if href and isinstance(href, str) and is_internal_link(href):
                 full = normalize_url(url, href)
                 if full.startswith(ROOT_URL) and full not in visited:
                     to_visit.add(full)
@@ -266,16 +271,20 @@ def extract_content(soup: BeautifulSoup, base_url: str):
     texts = []
     images = []
 
-    for tag in main.find_all(["h1", "h2", "h3", "h4", "p", "li", "code"]):
+    for tag in main.find_all(["h1", "h2", "h3", "h4", "p", "li", "code"]):  # type: ignore
         text = tag.get_text(strip=True)
         if text:
             texts.append(text)
 
-    for img in main.find_all("img"):
-        src = img.get("src")
-        alt = img.get("alt", "").strip()
+    for img in main.find_all("img"):  # type: ignore
+        src = img.get("src")  # type: ignore
+        alt = img.get("alt", "")  # type: ignore
+        if isinstance(alt, str):
+            alt = alt.strip()
+        else:
+            alt = ""
         if src:
-            full_img_url = urljoin(base_url, src)
+            full_img_url = urljoin(base_url, str(src))
             entry = f"[Image] {alt} — {full_img_url}" if alt else f"[Image] {full_img_url}"
             texts.append(entry)
             images.append({"url": full_img_url, "alt": alt})
@@ -295,13 +304,14 @@ def scrape_single(url: str):
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
-    title = soup.title.string.strip() if soup.title else url
+    title_tag = soup.title
+    title = title_tag.string.strip() if title_tag and title_tag.string else url
     body, images = extract_content(soup, url)
     return {"url": url, "title": title, "body": body, "images": images}
 
 
 # —— AI Assistant Functions —— #
-def get_ai_response(user_message: str, conversation_id: int, context_data: list = None):
+def get_ai_response(user_message: str, conversation_id: int, context_data: Optional[List] = None) -> str:
     """Enhanced AI response with better context awareness"""
     
     if not client:
@@ -337,7 +347,7 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     Би дараах зүйлсээр танд туслаж чадна:
     • 📚 Cloud.mn баримт бичгээс мэдээлэл хайх
     • ❓ Техникийн асуултад хариулах  
-    • 💬 Ерөнхий зөвлөгөө өгөх
+    •  Ерөнхий зөвлөгөө өгөх
     
     Асуултаа чөлөөтэй асуугаарай!"
     
@@ -381,12 +391,14 @@ def get_ai_response(user_message: str, conversation_id: int, context_data: list 
     try:
         response = client.chat.completions.create(
             model="gpt-4",
-            messages=messages,
+            messages=messages,  # type: ignore
             max_tokens=500,  # Increased token limit for better responses
             temperature=0.7
         )
         
         ai_response = response.choices[0].message.content
+        if ai_response is None:
+            ai_response = "Уучлаарай, хариулт үүсгэхэд алдаа гарлаа."
         
         # Store in memory
         if conversation_id not in conversation_memory:
@@ -514,7 +526,7 @@ def mark_conversation_resolved(conv_id: int):
 
 
 # —— Microsoft Teams Integration —— #
-def send_to_teams(email: str, issue: str, conv_id: int = None) -> bool:
+def send_to_teams(email: str, issue: str, conv_id: Optional[int] = None) -> bool:
     """Send issue to Microsoft Teams via webhook"""
     if not TEAMS_WEBHOOK_URL:
         logging.error("Teams webhook URL not configured")
@@ -884,7 +896,11 @@ def should_escalate_to_human(user_message: str, search_results: list, ai_respons
             temperature=0.2
         )
         
-        ai_decision = response.choices[0].message.content.strip().upper()
+        ai_decision = response.choices[0].message.content
+        if ai_decision:
+            ai_decision = ai_decision.strip().upper()
+        else:
+            ai_decision = "NO"
         logging.info(f"AI self-evaluation for '{user_message[:30]}...': {ai_decision}")
         return ai_decision == "YES"
         
@@ -1046,7 +1062,7 @@ def is_valid_email(email: str) -> bool:
     email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return bool(re.match(email_regex, email))
 
-def send_verification_email(email: str) -> str:
+def send_verification_email(email: str) -> Optional[str]:
     """Send verification email with code and return the code"""
     if not SMTP_FROM_EMAIL or not SMTP_PASSWORD or not SMTP_SERVER:
         logging.error("SMTP credentials not configured")
@@ -1077,7 +1093,8 @@ Cloud.mn тусламжийн үйлчилгээ"""
     try:
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
-        server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        if SMTP_USERNAME and SMTP_PASSWORD:
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
         server.send_message(msg)
         server.quit()
         logging.info(f"Verification email sent to {email}")
@@ -1112,7 +1129,8 @@ Cloud.mn тусламжийн үйлчилгээ"""
     try:
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
-        server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        if SMTP_USERNAME and SMTP_PASSWORD:
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
         server.send_message(msg)
         server.quit()
         logging.info(f"Confirmation email sent to {email}")
